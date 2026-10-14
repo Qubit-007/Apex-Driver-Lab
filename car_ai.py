@@ -223,6 +223,7 @@ class SharedPolicyTrainer:
 	"""Train one shared policy immediately from completed parallel episodes."""
 
 	CHECKPOINT_VERSION = 2
+	PPO_CLIP_RANGE = 0.2
 
 	def __init__(
 		self,
@@ -276,6 +277,7 @@ class SharedPolicyTrainer:
 		self.updates_completed = 0
 		self.episodes_trained = 0
 		self.episodes_since_batch_equivalent = 0
+		self.last_ppo_metrics = {"clip_fraction": 0.0, "approx_kl": 0.0}
 		self.load_checkpoint()
 
 	def sample_actions(
@@ -396,6 +398,9 @@ class SharedPolicyTrainer:
 		sample_count = len(actions)
 		loss_total = 0.0
 		minibatch_count = 0
+		clip_fraction_total = 0.0
+		approx_kl_total = 0.0
+		metric_sample_count = 0
 
 		for _ in range(optimization_epochs):
 			permutation = torch.randperm(sample_count)
@@ -406,11 +411,28 @@ class SharedPolicyTrainer:
 				batch_returns = return_tensor[indices].to(self.device)
 				distribution = Categorical(logits=self.policy(batch_states))
 				log_probabilities = distribution.log_prob(batch_actions)
-				ratios = torch.exp(
+				log_ratios = (
 					log_probabilities
 					- old_log_probability_tensor[indices].to(self.device)
 				)
-				clipped_ratios = torch.clamp(ratios, 0.8, 1.2)
+				ratios = torch.exp(log_ratios)
+				clipped_ratios = torch.clamp(
+					ratios,
+					1.0 - self.PPO_CLIP_RANGE,
+					1.0 + self.PPO_CLIP_RANGE,
+				)
+				batch_sample_count = int(indices.numel())
+				clip_fraction_total += float(
+					(torch.abs(ratios - 1.0) > self.PPO_CLIP_RANGE)
+					.float()
+					.sum()
+					.detach()
+					.cpu()
+				)
+				approx_kl_total += float(
+					((ratios - 1.0) - log_ratios).sum().detach().cpu()
+				)
+				metric_sample_count += batch_sample_count
 				policy_loss = -torch.minimum(
 					ratios * batch_returns,
 					clipped_ratios * batch_returns,
@@ -424,6 +446,10 @@ class SharedPolicyTrainer:
 				loss_total += float(loss.detach().cpu())
 				minibatch_count += 1
 
+		self.last_ppo_metrics = {
+			"clip_fraction": clip_fraction_total / metric_sample_count,
+			"approx_kl": approx_kl_total / metric_sample_count,
+		}
 		return loss_total / minibatch_count
 
 	def save_checkpoint(self) -> None:

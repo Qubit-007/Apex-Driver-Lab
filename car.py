@@ -329,6 +329,30 @@ def main() -> None:
 	parser.add_argument("--checkpoint", type=Path)
 	parser.add_argument("--seed", type=int, default=17)
 	parser.add_argument("--report-every", type=int, default=1000)
+	parser.add_argument(
+		"--async_reset",
+		"--async-reset",
+		dest="async_reset",
+		action="store_true",
+		help="train headless from complete auto-reset episodes in thresholded batches",
+	)
+	parser.add_argument("--async-episodes", type=int, default=32)
+	parser.add_argument("--async-transitions", type=int, default=8192)
+	parser.add_argument("--max-policy-lag", type=int, default=4)
+	parser.add_argument(
+		"--min_batch_episodes",
+		"--min-batch-episodes",
+		dest="min_batch_episodes",
+		type=int,
+		default=128,
+		help="minimum fresh complete episodes required for an async update",
+	)
+	parser.add_argument(
+		"--max-episode-steps",
+		type=int,
+		default=1800,
+		help="maximum steps per episode (default: 1800)",
+	)
 	args = parser.parse_args()
 
 	if args.mode == "gui":
@@ -351,6 +375,12 @@ def main() -> None:
 			checkpoint_path=args.checkpoint,
 			seed=args.seed,
 			report_every=args.report_every,
+			async_reset=args.async_reset,
+			async_episodes=args.async_episodes,
+			async_transitions=args.async_transitions,
+			max_policy_lag=args.max_policy_lag,
+			min_batch_episodes=args.min_batch_episodes,
+			max_episode_steps=args.max_episode_steps,
 		)
 
 

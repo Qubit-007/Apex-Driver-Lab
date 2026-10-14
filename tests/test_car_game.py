@@ -308,6 +308,19 @@ class SharedPolicyTrainerTests(unittest.TestCase):
 			)
 
 			self.assertTrue(torch.isfinite(torch.tensor(loss)))
+			self.assertGreaterEqual(
+				trainer.last_ppo_metrics["clip_fraction"],
+				0.0,
+			)
+			self.assertLessEqual(
+				trainer.last_ppo_metrics["clip_fraction"],
+				1.0,
+			)
+			self.assertTrue(
+				torch.isfinite(
+					torch.tensor(trainer.last_ppo_metrics["approx_kl"])
+				)
+			)
 			self.assertEqual(trainer.updates_completed, 1)
 			self.assertEqual(trainer.episodes_trained, 2)
 			self.assertLess(trainer.optimizer.param_groups[0]["lr"], initial_rate)
@@ -518,6 +531,173 @@ class HeadlessTrainingTests(unittest.TestCase):
 			events.index(("reset", 0, 1)),
 			events.index(("step", 1, 2)),
 		)
+
+	def test_async_reset_batches_complete_episodes_and_tracks_policy_versions(self) -> None:
+		from car_training import (
+			_EpisodeBuffer,
+			_FinishedEpisode,
+			_filter_stale_episodes,
+			_finish_episode,
+			train_headless,
+		)
+
+		events = []
+		simulations = []
+
+		class FakeSimulation:
+			OBSERVATION_SIZE = 1
+			MAX_EPISODE_STEPS = 1800
+
+			def __init__(self, **_kwargs) -> None:
+				self.index = len(simulations)
+				self.episode_steps = 0
+				self.episodes_completed = 0
+				self.player = types.SimpleNamespace(distance=0.0)
+				self.max_steps_at_creation = self.MAX_EPISODE_STEPS
+				simulations.append(self)
+
+			def observe(self):
+				return (float(self.index),)
+
+			def step(self, _action: int, dt: float):
+				self.episode_steps += 1
+				self.player.distance += 1.0
+				limit = 1 if self.index == 0 else 3
+				done = self.episode_steps >= limit
+				events.append(("step", self.index, self.episode_steps))
+				terminal = (float(100 + self.index), float(self.episode_steps))
+				return types.SimpleNamespace(
+					reward=float(self.episode_steps),
+					done=done,
+					crash_reason="episode limit" if done else None,
+					observation=terminal if done else (float(self.index),),
+				)
+
+			def reset(self):
+				self.episodes_completed += 1
+				self.episode_steps = 0
+				self.player.distance = 0.0
+				events.append(("reset", self.index, self.episodes_completed))
+				return (float(self.index),)
+
+		class FakeTrainer:
+			gamma = 0.5
+
+			def __init__(self, *_args, **_kwargs) -> None:
+				self.device = torch.device("cpu")
+				self.updates_completed = 0
+				self.episodes_trained = 0
+				self.optimizer = types.SimpleNamespace(
+					param_groups=[{"lr": 3e-4}]
+				)
+				self.batches = []
+				self.sampled_versions = []
+				self.last_ppo_metrics = {
+					"clip_fraction": 0.125,
+					"approx_kl": 0.03125,
+				}
+
+			def sample_actions(self, observations):
+				version = self.updates_completed
+				self.sampled_versions.append(version)
+				events.append(("sample", version))
+				return [(4, float(version)) for _ in observations]
+
+			def train_batch(self, episodes, **kwargs):
+				self.batches.append(episodes)
+				self.episodes_trained += len(episodes)
+				self.updates_completed += 1
+				events.append(("train_batch", len(episodes)))
+				return 0.25
+
+		logs = []
+		with patch("car_training.DrivingSimulation", FakeSimulation), patch(
+			"car_training.SharedPolicyTrainer", FakeTrainer
+		), patch("builtins.print", side_effect=logs.append):
+			trainer = train_headless(
+				environments=2,
+				updates=2,
+				device="cpu",
+				async_reset=True,
+				async_episodes=2,
+				async_transitions=1000,
+				max_policy_lag=4,
+				min_batch_episodes=3,
+				max_episode_steps=7,
+			)
+
+		self.assertEqual(trainer.updates_completed, 2)
+		self.assertEqual(trainer.episodes_trained, 8)
+		self.assertEqual(len(trainer.batches), 2)
+		self.assertTrue(all(len(batch) >= 3 for batch in trainer.batches))
+		self.assertEqual(
+			[len(episode) for episode in trainer.batches[0]],
+			[1, 1, 1, 3],
+		)
+		self.assertEqual(
+			[len(episode) for episode in trainer.batches[1]],
+			[1, 1, 1, 3],
+		)
+		self.assertTrue(
+			all(
+				all(value == 0.0 for value in episode.log_probabilities)
+				for episode in trainer.batches[0]
+			)
+		)
+		self.assertTrue(
+			all(
+				all(value == 1.0 for value in episode.log_probabilities)
+				for episode in trainer.batches[1]
+			)
+		)
+		self.assertEqual(
+			[simulation.MAX_EPISODE_STEPS for simulation in simulations],
+			[7, 7],
+		)
+		self.assertEqual([simulation.episodes_completed for simulation in simulations], [6, 2])
+		self.assertIn(("step", 1, 2), events)
+		self.assertLess(
+			events.index(("reset", 0, 1)),
+			events.index(("step", 1, 2)),
+		)
+		self.assertEqual(trainer.sampled_versions, [0, 0, 0, 1, 1, 1])
+		update_logs = [log for log in logs if log.startswith("Update ")]
+		self.assertEqual(len(update_logs), 2)
+		self.assertTrue(
+			all(
+				"episodes used 4" in log
+				and "distance mean/median 1.5/1.0 m" in log
+				and "end reasons [episode limit=4]" in log
+				and "PPO clip fraction 0.125" in log
+				and "approx KL 0.03125" in log
+				for log in update_logs
+			)
+		)
+
+		rollout = EpisodeRollout(1)
+		rollout.append((0.0,), 4, 1.0, -0.5)
+		rollout.append((0.0,), 4, 2.0, -0.5)
+		finished = _finish_episode(
+			_EpisodeBuffer(rollout, [0, 0]),
+			terminal_observation=(9.0,),
+			gamma=0.5,
+		)
+		self.assertEqual(finished.discounted_returns, [2.0, 2.0])
+		self.assertEqual(finished.terminal_observation, (9.0,))
+		self.assertEqual(finished.policy_lag(current_version=2), 2)
+		fresh = _FinishedEpisode(
+			rollout=rollout,
+			policy_versions=[2, 2],
+			discounted_returns=[2.0, 2.0],
+			terminal_observation=(9.0,),
+		)
+		kept, stale_count = _filter_stale_episodes(
+			[finished, fresh],
+			current_policy_version=2,
+			max_policy_lag=1,
+		)
+		self.assertEqual(kept, [fresh])
+		self.assertEqual(stale_count, 1)
 
 
 class GameGuiTests(unittest.TestCase):
