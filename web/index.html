@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="theme-color" content="#111815">
+		<meta name="description" content="Apex Driver Lab: live procedural driving simulation and reinforcement-learning telemetry.">
+		<title>Apex Driver Lab | Live Simulation</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+		<link rel="stylesheet" href="./styles.css">
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js"
+				}
+			}
+		</script>
+		<script type="module" src="./app.js"></script>
+	</head>
+	<body>
+		<main class="app-shell">
+			<header class="topbar">
+				<a class="brand" href="./" aria-label="Apex Driver Lab home">
+					<span class="brand-mark" aria-hidden="true">A</span>
+					<span class="brand-copy"><strong>APEX</strong><small>DRIVER LAB</small></span>
+				</a>
+				<div class="session-label"><span class="live-dot"></span> LIVE SIMULATION <span class="session-divider">/</span> <span id="model-status">BROWSER DRIVER</span></div>
+				<div class="top-actions">
+					<button class="icon-button" id="sound-toggle" type="button" aria-label="Toggle engine sound" title="Toggle engine sound">
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4H4Zm12-1a4 4 0 0 1 0 6m2-9a8 8 0 0 1 0 12"/></svg>
+					</button>
+					<a class="source-link" href="https://github.com/Izzo047/Quantum-Wave-Simulation-with-AI" target="_blank" rel="noreferrer">SOURCE <span aria-hidden="true">↗</span></a>
+				</div>
+			</header>
+
+			<section class="telemetry-bar" aria-label="Live vehicle telemetry">
+				<div class="metric metric-speed"><span class="metric-label">SPEED</span><strong id="speed-value">072</strong><span class="metric-unit">KM/H</span></div>
+				<div class="metric"><span class="metric-label">SAFE TARGET</span><strong id="target-value">079</strong><span class="metric-unit">KM/H</span></div>
+				<div class="metric"><span class="metric-label">DISTANCE</span><strong id="distance-value">000.0</strong><span class="metric-unit">M</span></div>
+				<div class="metric"><span class="metric-label">EPISODE</span><strong id="episode-value">001</strong><span class="metric-unit">RUN</span></div>
+				<div class="metric metric-sensors"><span class="metric-label">SENSORS</span><strong id="sensor-value">CLEAR</strong><span class="sensor-lights"><i></i><i></i><i></i></span></div>
+				<div class="metric metric-policy"><span class="metric-label">DRIVER MODE</span><strong id="updates-value">AUTO</strong><span class="metric-unit">SAFETY ASSISTED</span></div>
+			</section>
+
+			<section class="race-layout" aria-label="Driving simulation">
+				<div class="scene-wrap" id="scene-wrap">
+					<div class="scene-topline"><span>PROCEDURAL CIRCUIT <b id="track-seed">TRACK 017</b></span><span id="weather-label">DRY / DAYLIGHT</span></div>
+					<div id="scene" role="img" aria-label="Three-dimensional driving simulation scene"></div>
+					<div class="scene-bottomline"><span><i class="keycap">A</i><i class="keycap">D</i> STEER</span><span><i class="keycap">W</i><i class="keycap">S</i> SPEED</span><span><i class="keycap">SPACE</i> RESET</span></div>
+					<div class="scene-alert" id="scene-alert" aria-live="polite"><span></span><strong>SENSORS CLEAR</strong><small>FORWARD RADAR ACTIVE</small></div>
+				</div>
+
+				<aside class="right-rail">
+					<section class="rail-section driver-section">
+						<div class="section-heading"><span>01 / DRIVER</span><span class="status-pill"><i></i> ACTIVE</span></div>
+						<div class="driver-card">
+							<div class="driver-avatar">AI</div>
+							<div class="driver-meta"><strong>BROWSER DRIVER POLICY</strong><span>Procedural / safety-assisted</span></div>
+							<button class="play-toggle" id="pause-toggle" type="button" aria-label="Pause simulation" title="Pause simulation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+						</div>
+						<div class="assist-row"><span>LANE ASSIST</span><strong>ON</strong><span class="assist-line"></span><span>COLLISION AVOID</span><strong>ON</strong></div>
+					</section>
+
+					<section class="rail-section controls-section">
+						<div class="section-heading"><span>02 / CONTROL</span><span class="mono-note">MANUAL OVERRIDE</span></div>
+						<div class="control-pair">
+							<button class="steer-control" id="steer-left" type="button" aria-label="Steer left">←</button>
+							<div class="steer-readout"><span>STEERING</span><strong id="steer-value">+00°</strong><div class="steer-track"><i id="steer-indicator"></i></div></div>
+							<button class="steer-control" id="steer-right" type="button" aria-label="Steer right">→</button>
+						</div>
+						<label class="throttle-control" for="throttle-slider"><span>THROTTLE <b id="throttle-value">62%</b></span><input id="throttle-slider" type="range" min="0" max="100" value="62"><span class="range-labels"><small>COAST</small><small>ACCELERATE</small></span></label>
+						<div class="control-hint">KEYBOARD OVERRIDE ENABLED</div>
+					</section>
+
+					<section class="rail-section sensor-section">
+						<div class="section-heading"><span>03 / ENVIRONMENT</span><span class="mono-note">14 OBJECTS</span></div>
+						<div class="sensor-readout"><div class="radar-icon"><span></span><i></i></div><div><strong id="radar-distance">24.0 <small>M</small></strong><span>NEAREST VEHICLE</span></div><b class="clear-tag" id="radar-state">CLEAR</b></div>
+						<div class="road-clearance"><span>ROAD CLEARANCE</span><div><i id="clearance-fill"></i></div><b id="clearance-value">42%</b></div>
+					</section>
+
+					<section class="rail-section run-section">
+						<div class="section-heading"><span>04 / RUN HISTORY</span><button class="text-button" id="reset-button" type="button">RESET ↻</button></div>
+						<div class="run-summary"><strong id="best-distance">—</strong><span>BEST DISTANCE <small>M</small></span><strong id="collision-count">00</strong><span>COLLISIONS</span></div>
+						<svg class="sparkline" viewBox="0 0 280 48" preserveAspectRatio="none" role="img" aria-label="Recent run distances trend"><path class="spark-area" d="M0 42 L24 37 L48 39 L72 27 L96 31 L120 18 L144 24 L168 15 L192 19 L216 8 L240 14 L264 4 L280 8 L280 48 L0 48 Z"/><path class="spark-stroke" d="M0 42 L24 37 L48 39 L72 27 L96 31 L120 18 L144 24 L168 15 L192 19 L216 8 L240 14 L264 4 L280 8"/></svg>
+					</section>
+				</aside>
+			</section>
+
+			<footer class="footer-bar"><span>APEX DRIVER LAB <i>•</i> BROWSER SIMULATION</span><span>THREE.JS <i>•</i> BROWSER POLICY DEMO</span><span id="frame-status">INITIALIZING</span></footer>
+		</main>
+	</body>
+</html>

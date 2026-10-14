@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a focused improvement to the simulator or training tools.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: Please search existing issues first and describe one feature per request.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What limitation or workflow should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful version of the improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

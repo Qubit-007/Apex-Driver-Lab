@@ -110,12 +110,12 @@ def run_gui(device: str | None = None) -> None:
 	from car_simulation import DrivingSimulation
 
 	root = tk.Tk()
-	root.title("Procedural Traffic AI")
+	root.title("Apex Driver Lab")
 	root.geometry("800x600")
 	root.minsize(640, 480)
-	root.configure(bg="#254b35")
+	root.configure(bg="#17231e")
 
-	canvas = tk.Canvas(root, width=800, height=600, bg="#254b35", highlightthickness=0)
+	canvas = tk.Canvas(root, width=800, height=600, bg="#20352c", highlightthickness=0)
 	canvas.pack(fill="both", expand=True)
 
 	track = ProceduralTrack(point_spacing=1.0, chunks_ahead=5)
@@ -138,32 +138,113 @@ def run_gui(device: str | None = None) -> None:
 		scale: float,
 		canvas_center: float,
 		road_center_x: float,
+		heading: float = 0.0,
 	) -> None:
 		center_x = canvas_center + (
 			track.center_x_at(distance) + lateral - road_center_x
 		) * scale
 		half_width = 1.1 * scale
 		length = 2.0 * scale
-		canvas.create_polygon(
-			center_x - half_width * 0.8, y + length,
-			center_x - half_width, y + length * 0.45,
-			center_x - half_width, y - length * 0.65,
-			center_x - half_width * 0.55, y - length,
-			center_x + half_width * 0.55, y - length,
-			center_x + half_width, y - length * 0.65,
-			center_x + half_width, y + length * 0.45,
-			center_x + half_width * 0.8, y + length,
-			fill=color,
-			outline="white",
-			width=1,
+		cos_heading = math.cos(heading)
+		sin_heading = math.sin(heading)
+
+		def projected_points(points: tuple[tuple[float, float], ...]) -> tuple[float, ...]:
+			projected = []
+			for local_x, local_y in points:
+				projected.extend((
+					center_x + local_x * cos_heading - local_y * sin_heading,
+					y + local_x * sin_heading + local_y * cos_heading,
+				))
+			return tuple(projected)
+
+		def draw_polygon(
+			points: tuple[tuple[float, float], ...],
+			fill: str,
+			outline: str = "",
+			width: int = 1,
+		) -> None:
+			canvas.create_polygon(
+				*projected_points(points), fill=fill, outline=outline, width=width,
+			)
+
+		draw_polygon((
+			(-half_width * 0.72, length * 0.78),
+			(-half_width * 0.9, length * 0.12),
+			(0.0, -length * 0.12),
+			(half_width * 0.9, length * 0.12),
+			(half_width * 0.72, length * 0.78),
+		), "#111714")
+		wheel_width = max(1.0, half_width * 0.22)
+		wheel_height = max(1.0, length * 0.25)
+		for wheel_x in (-1.0, 1.0):
+			for wheel_y in (-0.5, 0.48):
+				wheel_x_center = wheel_x * half_width * 0.78
+				wheel_y_center = wheel_y * length
+				draw_polygon((
+					(wheel_x_center - wheel_width / 2.0, wheel_y_center - wheel_height / 2.0),
+					(wheel_x_center + wheel_width / 2.0, wheel_y_center - wheel_height / 2.0),
+					(wheel_x_center + wheel_width / 2.0, wheel_y_center + wheel_height / 2.0),
+					(wheel_x_center - wheel_width / 2.0, wheel_y_center + wheel_height / 2.0),
+			), "#101416")
+		draw_polygon((
+			(-half_width * 0.8, length),
+			(-half_width, length * 0.45),
+			(-half_width, -length * 0.65),
+			(-half_width * 0.55, -length),
+			(half_width * 0.55, -length),
+			(half_width, -length * 0.65),
+			(half_width, length * 0.45),
+			(half_width * 0.8, length),
+		), color, outline="white", width=1)
+		draw_polygon((
+			(-half_width * 0.65, -length * 0.35),
+			(-half_width * 0.42, -length * 0.78),
+			(half_width * 0.42, -length * 0.78),
+			(half_width * 0.65, -length * 0.35),
+		), "#b3e5fc")
+		draw_polygon((
+			(-half_width * 0.12, length * 0.5),
+			(-half_width * 0.09, -length * 0.25),
+			(half_width * 0.09, -length * 0.25),
+			(half_width * 0.12, length * 0.5),
+		), "#ffffff" if color == "#e53935" else "#d8e0df")
+		for light_x in (-0.58, 0.58):
+			light_center_x = light_x * half_width
+			light_top = length * 0.58
+			light_bottom = length * 0.76
+			draw_polygon((
+				(light_center_x - wheel_width * 0.55, light_top),
+				(light_center_x + wheel_width * 0.55, light_top),
+				(light_center_x + wheel_width * 0.55, light_bottom),
+				(light_center_x - wheel_width * 0.55, light_bottom),
+			), "#ffd08a")
+
+	def draw_tree(x: float, y: float, size: float) -> None:
+		canvas.create_rectangle(
+			x - size * 0.1, y - size * 0.25,
+			x + size * 0.1, y + size * 0.65,
+			fill="#55483a", outline="",
 		)
-		canvas.create_polygon(
-			center_x - half_width * 0.65, y - length * 0.35,
-			center_x - half_width * 0.42, y - length * 0.78,
-			center_x + half_width * 0.42, y - length * 0.78,
-			center_x + half_width * 0.65, y - length * 0.35,
-			fill="#b3e5fc",
-			outline="",
+		for offset, width, color in (
+			(0.48, 0.72, "#355344"),
+			(0.2, 0.58, "#41634e"),
+			(-0.08, 0.42, "#527657"),
+		):
+			canvas.create_polygon(
+				x, y - size,
+				x - size * width, y + size * offset,
+				x + size * width, y + size * offset,
+				fill=color, outline="",
+			)
+
+	def draw_panel(left: float, top: float, right: float, bottom: float) -> None:
+		canvas.create_rectangle(
+			left, top, right, bottom,
+			fill="#14211c", outline="#3a5145", width=1,
+		)
+		canvas.create_rectangle(
+			left, top, left + 3, bottom,
+			fill="#b5d779", outline="",
 		)
 
 	def draw_frame() -> None:
@@ -207,35 +288,90 @@ def run_gui(device: str | None = None) -> None:
 					road_points.append((x, point_distance, width, y))
 
 		canvas.delete("all")
+		canvas.create_rectangle(
+			0, 0, canvas_width, canvas_height,
+			fill="#20352c", outline="",
+		)
+		first_tree_distance = max(0, int(visible_start // 18.0) * 18)
+		for tree_distance in range(first_tree_distance, int(visible_end) + 18, 18):
+			if tree_distance < 0:
+				continue
+			tree_y = car_y - (tree_distance - player.distance) * scale
+			if tree_y < 66 or tree_y > canvas_height + 30:
+				continue
+			tree_scale = max(
+				0.55,
+				min(1.8, 1.75 - max(0.0, tree_distance - player.distance) / 75.0),
+			)
+			tree_size = scale * 2.2 * tree_scale
+			track_x = track.center_x_at(float(tree_distance))
+			for side in (-1.0, 1.0):
+				tree_lateral = side * (track.track_width / 2.0 + 3.0 + tree_size / scale)
+				tree_x = canvas_center + (track_x + tree_lateral - road_center_x) * scale
+				if -tree_size < tree_x < canvas_width + tree_size:
+					draw_tree(tree_x, tree_y, tree_size)
 		if len(road_points) >= 2:
 			left_edge = []
 			right_edge = []
+			outer_left = []
+			outer_right = []
 			centerline = []
 			for x, point_distance, width, y in road_points:
 				center_x = canvas_center + (x - road_center_x) * scale
 				half_width = width * scale / 2.0
 				left_edge.extend((center_x - half_width, y))
 				right_edge.extend((center_x + half_width, y))
-				centerline.append((center_x, y, point_distance))
+				shoulder_width = min(2.6 * scale, 24.0)
+				outer_left.extend((center_x - half_width - shoulder_width, y))
+				outer_right.extend((center_x + half_width + shoulder_width, y))
+				centerline.append((center_x, y, point_distance, half_width))
 
 			canvas.create_polygon(
+				*(outer_left + list(reversed(left_edge))),
+				fill="#283432", outline="",
+			)
+			canvas.create_polygon(
+				*(right_edge + list(reversed(outer_right))),
+				fill="#283432", outline="",
+			)
+			canvas.create_polygon(
 				*(left_edge + list(reversed(right_edge))),
-				fill="#454b50",
+				fill="#394149",
 				outline="",
 			)
-			canvas.create_line(*left_edge, fill="#f4d35e", width=3)
-			canvas.create_line(*right_edge, fill="#f4d35e", width=3)
+			for start, end in zip(centerline, centerline[1:]):
+				if int(((start[2] + end[2]) / 2.0) // 8) % 2 == 0:
+					curb_color = "#e78369"
+				else:
+					curb_color = "#e2e5d6"
+				curb_width = min(0.42 * scale, 5.0)
+				canvas.create_polygon(
+					start[0] - start[3] - curb_width, start[1],
+					start[0] - start[3], start[1],
+					end[0] - end[3], end[1],
+					end[0] - end[3] - curb_width, end[1],
+					fill=curb_color, outline="",
+				)
+				canvas.create_polygon(
+					start[0] + start[3], start[1],
+					start[0] + start[3] + curb_width, start[1],
+					end[0] + end[3] + curb_width, end[1],
+					end[0] + end[3], end[1],
+					fill=curb_color, outline="",
+				)
+			canvas.create_line(*left_edge, fill="#d9e69c", width=1)
+			canvas.create_line(*right_edge, fill="#d9e69c", width=1)
 			for start, end in zip(centerline, centerline[1:]):
 				if int(((start[2] + end[2]) / 2.0) // 16) % 2 == 0:
 					canvas.create_line(
 						start[0], start[1], end[0], end[1],
-						fill="#f4f4f4", width=3,
+						fill="#d9ded8", width=2,
 					)
 
 		for traffic_car in simulation.traffic:
 			if visible_start <= traffic_car.distance <= visible_end:
 				traffic_y = car_y - (traffic_car.distance - player.distance) * scale
-				color = ("#42a5f5", "#ffca28", "#ab47bc")[traffic_car.car_id % 3]
+				color = ("#74b8d1", "#e3bd69", "#d48670")[traffic_car.car_id % 3]
 				draw_car(
 					traffic_car.distance, traffic_car.lateral, traffic_y, color,
 					scale, canvas_center, road_center_x,
@@ -243,23 +379,81 @@ def run_gui(device: str | None = None) -> None:
 		draw_car(
 			player.distance, player.lateral, car_y, "#e53935",
 			scale, canvas_center, road_center_x,
+			heading=0.65 * math.atan2(
+				simulation.player_lateral_velocity,
+				max(simulation.PLAYER_MIN_SPEED, player.speed),
+			),
 		)
 
-		canvas.create_rectangle(12, 12, 380, 138, fill="#17211c", outline="")
+		canvas.create_rectangle(
+			0, 0, canvas_width, 64, fill="#101b17", outline="",
+		)
+		canvas.create_line(0, 63, canvas_width, 63, fill="#496052", width=1)
 		canvas.create_text(
-			26, 27, anchor="nw", fill="white",
-			font=("Consolas", 13, "bold"),
-			text=f"EPISODE   {episode:04d}   STEPS {simulation.steps:04d}",
+			18, 14, anchor="nw", fill="#d7e7c6",
+			font=("Segoe UI", 12, "bold"),
+			text="APEX / DRIVER LAB",
 		)
 		canvas.create_text(
-			26, 52, anchor="nw", fill="#b3e5fc",
-			font=("Consolas", 13, "bold"),
-			text=f"DISTANCE  {player.distance:07.1f} m",
+			18, 38, anchor="nw", fill="#9db1a4",
+			font=("Segoe UI", 9),
+			text="AUTONOMOUS TRAFFIC SIMULATION",
 		)
 		canvas.create_text(
-			26, 77, anchor="nw", fill="#a5d6a7",
-			font=("Consolas", 13, "bold"),
-			text=f"SPEED     {player.speed * 3.6:05.1f} km/h",
+			canvas_width - 18, 15, anchor="ne", fill="#d9e69c",
+			font=("Segoe UI", 10, "bold"),
+			text=f"TRAINING ON {'GPU' if driver.device.type == 'cuda' else 'CPU'}",
+		)
+		canvas.create_text(
+			canvas_width - 18, 38, anchor="ne", fill="#9db1a4",
+			font=("Segoe UI", 9),
+			text=driver.training_status,
+		)
+
+		draw_panel(16, 82, 278, 222)
+		canvas.create_text(
+			30, 95, anchor="nw", fill="#9db1a4",
+			font=("Segoe UI", 9, "bold"), text="CURRENT RUN",
+		)
+		canvas.create_text(
+			30, 119, anchor="nw", fill="#e6ece3",
+			font=("Consolas", 11, "bold"),
+			text=f"EPISODE {episode:04d}  /  STEP {simulation.steps:04d}",
+		)
+		canvas.create_text(
+			30, 146, anchor="nw", fill="#a9c7cc",
+			font=("Segoe UI", 10), text=f"DISTANCE   {player.distance:07.1f} m",
+		)
+		canvas.create_text(
+			30, 169, anchor="nw", fill="#d9e69c",
+			font=("Segoe UI", 10, "bold"),
+			text=f"SPEED      {player.speed * 3.6:05.1f} km/h",
+		)
+		meter_left, meter_top, meter_right = 30, 194, 260
+		safe_speed_limit = simulation._safe_speed_limit()
+		canvas.create_rectangle(
+			meter_left, meter_top, meter_right, meter_top + 5,
+			fill="#34473d", outline="",
+		)
+		canvas.create_rectangle(
+			meter_left, meter_top,
+			meter_left + (meter_right - meter_left)
+			* min(1.0, player.speed / simulation.PLAYER_MAX_SPEED),
+			meter_top + 5,
+			fill="#e87560" if player.speed > safe_speed_limit else "#b5d779",
+			outline="",
+		)
+		target_x = meter_left + (meter_right - meter_left) * min(
+			1.0, safe_speed_limit / simulation.PLAYER_MAX_SPEED
+		)
+		canvas.create_line(
+			target_x, meter_top - 2, target_x, meter_top + 7,
+			fill="#ffffff", width=2,
+		)
+		canvas.create_text(
+			30, 204, anchor="nw", fill="#82988a",
+			font=("Segoe UI", 8),
+			text=f"SAFE SPEED TARGET  {safe_speed_limit * 3.6:.0f} km/h",
 		)
 		if recent_runs:
 			mean_distance = sum(distance for distance, _ in recent_runs) / len(recent_runs)
@@ -269,31 +463,38 @@ def run_gui(device: str | None = None) -> None:
 			)
 		else:
 			progress_text = "RUN AVERAGE: collecting first episode"
+		footer_top = canvas_height - 58
+		draw_panel(16, footer_top, min(canvas_width - 16, 340), canvas_height - 14)
 		canvas.create_text(
-			26, 103, anchor="nw", fill="#ffe082",
-			font=("Consolas", 11, "bold"),
-			text=progress_text,
+			30, footer_top + 12, anchor="nw", fill="#d9e69c",
+			font=("Segoe UI", 9, "bold"), text=progress_text,
 		)
-		device_name = "GPU" if driver.device.type == "cuda" else "CPU"
+		panel_left = max(350, canvas_width - 244)
+		draw_panel(panel_left, 82, canvas_width - 16, 146)
 		canvas.create_text(
-			canvas_width - 20, 18, anchor="ne", fill="white",
-			font=("Segoe UI", 11),
-			text="TRAFFIC 20 km/h  |  AI MIN 40 km/h",
+			panel_left + 14, 94, anchor="nw", fill="#9db1a4",
+			font=("Segoe UI", 9, "bold"), text="TRAFFIC",
 		)
 		canvas.create_text(
-			canvas_width - 20, 40, anchor="ne", fill="#b3e5fc",
-			font=("Segoe UI", 10),
-			text=f"TRAINING ON {device_name}  |  {driver.episodes_trained} updates",
+			panel_left + 14, 115, anchor="nw", fill="#e6ece3",
+			font=("Segoe UI", 10), text="20 km/h  |  MIN 40 km/h",
+		)
+		threat_detected = simulation._collision_brake() > 0.0
+		canvas.create_text(
+			panel_left + 14, 132, anchor="nw",
+			fill="#e87560" if threat_detected else "#9fc98d",
+			font=("Segoe UI", 8, "bold"),
+			text="PROXIMITY ALERT" if threat_detected else "SENSORS CLEAR",
 		)
 		if crash_message is not None:
 			canvas.create_rectangle(
 				canvas_center - 190, canvas_height * 0.28,
 				canvas_center + 190, canvas_height * 0.43,
-				fill="#17211c", outline="#ef5350", width=2,
+				fill="#14211c", outline="#e87560", width=2,
 			)
 			canvas.create_text(
 				canvas_center, canvas_height * 0.32,
-				fill="#ef5350", font=("Segoe UI", 20, "bold"),
+				fill="#e87560", font=("Segoe UI", 20, "bold"),
 				text=crash_message.upper(),
 			)
 			canvas.create_text(
@@ -323,6 +524,11 @@ def main() -> None:
 	)
 	parser.add_argument("--environments", type=int, default=1000)
 	parser.add_argument("--updates", type=int, default=1000)
+	parser.add_argument(
+		"--until-stopped",
+		action="store_true",
+		help="train continuously until Ctrl+C; completed updates are checkpointed",
+	)
 	parser.add_argument("--minibatch-size", type=int, default=4096)
 	parser.add_argument("--optimization-epochs", type=int, default=4)
 	parser.add_argument("--learning-rate-decay", type=float, default=0.995)
@@ -341,17 +547,20 @@ def main() -> None:
 	else:
 		from car_training import train_headless
 
-		train_headless(
-			environments=args.environments,
-			updates=args.updates,
-			device=args.device or "cuda",
-			minibatch_size=args.minibatch_size,
-			optimization_epochs=args.optimization_epochs,
-			learning_rate_decay=args.learning_rate_decay,
-			checkpoint_path=args.checkpoint,
-			seed=args.seed,
-			report_every=args.report_every,
-		)
+		try:
+			train_headless(
+				environments=args.environments,
+				updates=None if args.until_stopped else args.updates,
+				device=args.device or "cuda",
+				minibatch_size=args.minibatch_size,
+				optimization_epochs=args.optimization_epochs,
+				learning_rate_decay=args.learning_rate_decay,
+				checkpoint_path=args.checkpoint,
+				seed=args.seed,
+				report_every=args.report_every,
+			)
+		except KeyboardInterrupt:
+			print("Training stopped by user. Latest completed update is checkpointed.")
 
 
 if __name__ == "__main__":
