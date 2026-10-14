@@ -17,11 +17,11 @@ class DrivingPolicy(nn.Module):
 	def __init__(self, observation_size: int, action_count: int = 9) -> None:
 		super().__init__()
 		self.layers = nn.Sequential(
-			nn.Linear(observation_size, 128),
+			nn.Linear(observation_size, 256),
 			nn.Tanh(),
-			nn.Linear(128, 128),
+			nn.Linear(256, 256),
 			nn.Tanh(),
-			nn.Linear(128, action_count),
+			nn.Linear(256, action_count),
 		)
 
 	def forward(self, observation: Tensor) -> Tensor:
@@ -34,7 +34,7 @@ class OnlineDriver:
 	def __init__(
 		self,
 		observation_size: int,
-		checkpoint_path: Path | str = Path(__file__).with_name("car_ai_checkpoint_v2.pt"),
+		checkpoint_path: Path | str = Path(__file__).with_name("car_ai_checkpoint_v4.pt"),
 		device: torch.device | str | None = None,
 		learning_rate: float = 3e-4,
 		gamma: float = 0.99,
@@ -43,7 +43,11 @@ class OnlineDriver:
 			device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
 		)
 		self.policy = DrivingPolicy(observation_size).to(self.device)
-		self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=learning_rate)
+		self.optimizer = torch.optim.AdamW(
+			self.policy.parameters(),
+			lr=learning_rate,
+			weight_decay=1e-4,
+		)
 		self.checkpoint_path = Path(checkpoint_path)
 		self.gamma = gamma
 		self._log_probabilities: List[Tensor] = []

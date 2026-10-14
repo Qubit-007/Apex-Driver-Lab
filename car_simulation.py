@@ -41,11 +41,23 @@ class DrivingSimulation:
 	STEERING_VALUES = (-1.0, 0.0, 1.0)
 	THROTTLE_VALUES = (-1.0, 0.0, 1.0)
 	TRAFFIC_FEATURES = 4
+	TRAFFIC_FEATURES_PER_CAR = 4
 	ROAD_CLEARANCE_FEATURES = 2
-	OBSERVATION_SIZE = 3 + ROAD_CLEARANCE_FEATURES + TRAFFIC_FEATURES * 3
+	HORIZONTAL_DISTANCE_SCALE = 40.0
+	VERTICAL_DISTANCE_SCALE = 100.0
+	LATERAL_DISTANCE_SCALE = 6.0
+	RELATIVE_SPEED_SCALE = 20.0
+	OBSERVATION_SIZE = (
+		3 + ROAD_CLEARANCE_FEATURES
+		+ TRAFFIC_FEATURES * TRAFFIC_FEATURES_PER_CAR
+	)
 	LEFT_CLEARANCE_INDEX = 3
 	RIGHT_CLEARANCE_INDEX = 4
 	TRAFFIC_FEATURES_START_INDEX = 5
+	TRAFFIC_HORIZONTAL_OFFSET = 0
+	TRAFFIC_VERTICAL_OFFSET = 1
+	TRAFFIC_LANE_OFFSET = 2
+	TRAFFIC_RELATIVE_SPEED_OFFSET = 3
 	MAX_EPISODE_STEPS = 1800
 
 	def __init__(
@@ -94,9 +106,18 @@ class DrivingSimulation:
 		return self.observe()
 
 	def observe(self) -> Observation:
-		"""Describe road edges and nearest traffic using normalized relative values."""
+		"""Return normalized inputs: road data then (x, y, lane, speed) per car.
+
+			Traffic x is world-horizontal meters, positive to the right; y is
+			track-forward meters, positive for a car ahead. Lane is the signed
+			track-relative lateral separation. Distances are scaled by their named
+			scales and clamped for stable policy-network inputs.
+		"""
 		road_half_width = self.track.track_width / 2.0
 		speed_limit = self.PLAYER_MAX_SPEED
+		player_world_x = (
+			self.track.center_x_at(self.player.distance) + self.player.lateral
+		)
 		curve_ahead = (
 			self.track.center_x_at(self.player.distance + 16.0)
 			- self.track.center_x_at(self.player.distance)
@@ -117,18 +138,44 @@ class DrivingSimulation:
 
 		nearby = sorted(
 			self.traffic,
-			key=lambda car: abs(car.distance - self.player.distance),
+			key=lambda car: (
+				abs(car.distance - self.player.distance),
+				abs(car.lateral - self.player.lateral),
+			),
 		)[: self.TRAFFIC_FEATURES]
 		for car in nearby:
+			car_world_x = self.track.center_x_at(car.distance) + car.lateral
+			horizontal_distance = car_world_x - player_world_x
+			vertical_distance = car.distance - self.player.distance
 			features.extend(
 				(
-					max(-1.0, min(1.0, (car.distance - self.player.distance) / 100.0)),
-					max(-1.0, min(1.0, (car.lateral - self.player.lateral) / road_half_width)),
-					max(-1.0, min(1.0, (car.speed - self.player.speed) / 20.0)),
+					max(
+						-1.0,
+						min(1.0, horizontal_distance / self.HORIZONTAL_DISTANCE_SCALE),
+					),
+					max(
+						-1.0,
+						min(1.0, vertical_distance / self.VERTICAL_DISTANCE_SCALE),
+					),
+					max(
+						-1.0,
+						min(
+							1.0,
+							(car.lateral - self.player.lateral)
+							/ self.LATERAL_DISTANCE_SCALE,
+						),
+					),
+					max(
+						-1.0,
+						min(
+							1.0,
+							(car.speed - self.player.speed) / self.RELATIVE_SPEED_SCALE,
+						),
+					),
 				)
 			)
 		for _ in range(self.TRAFFIC_FEATURES - len(nearby)):
-			features.extend((1.0, 0.0, 0.0))
+			features.extend((0.0, 1.0, 0.0, 0.0))
 
 		return tuple(features)
 

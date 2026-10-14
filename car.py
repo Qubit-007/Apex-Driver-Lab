@@ -100,6 +100,7 @@ class ProceduralTrack:
 
 def run_gui() -> None:
 	"""Watch a PyTorch driver learn to navigate procedural traffic."""
+	from collections import deque
 	import time
 	import tkinter as tk
 
@@ -119,7 +120,7 @@ def run_gui() -> None:
 	simulation = DrivingSimulation(track=track, traffic_count=14, seed=17)
 	driver = OnlineDriver(simulation.OBSERVATION_SIZE)
 	episode = 1
-	last_loss: float | None = None
+	recent_runs: deque[tuple[float, int]] = deque(maxlen=20)
 	crash_message: str | None = None
 	restart_at = 0.0
 	last_frame = time.perf_counter()
@@ -161,7 +162,7 @@ def run_gui() -> None:
 		)
 
 	def draw_frame() -> None:
-		nonlocal episode, last_loss, crash_message, restart_at, last_frame
+		nonlocal episode, crash_message, restart_at, last_frame
 		now = time.perf_counter()
 		dt = max(0.001, min(now - last_frame, 0.1))
 		last_frame = now
@@ -181,7 +182,8 @@ def run_gui() -> None:
 			result = simulation.step(action, dt)
 			driver.record(log_probability, result.reward)
 			if result.done:
-				last_loss = driver.finish_episode()
+				driver.finish_episode()
+				recent_runs.append((simulation.player.distance, simulation.steps))
 				crash_message = result.crash_reason or "episode complete"
 				restart_at = now + 1.0
 
@@ -238,7 +240,7 @@ def run_gui() -> None:
 			scale, canvas_center, road_center_x,
 		)
 
-		canvas.create_rectangle(12, 12, 335, 116, fill="#17211c", outline="")
+		canvas.create_rectangle(12, 12, 380, 138, fill="#17211c", outline="")
 		canvas.create_text(
 			26, 27, anchor="nw", fill="white",
 			font=("Consolas", 13, "bold"),
@@ -254,8 +256,20 @@ def run_gui() -> None:
 			font=("Consolas", 13, "bold"),
 			text=f"SPEED     {player.speed * 3.6:05.1f} km/h",
 		)
+		if recent_runs:
+			mean_distance = sum(distance for distance, _ in recent_runs) / len(recent_runs)
+			mean_steps = sum(steps for _, steps in recent_runs) / len(recent_runs)
+			progress_text = (
+				f"LAST {len(recent_runs)} AVG {mean_distance:.0f} m / {mean_steps:.0f} frames"
+			)
+		else:
+			progress_text = "RUN AVERAGE: collecting first episode"
+		canvas.create_text(
+			26, 103, anchor="nw", fill="#ffe082",
+			font=("Consolas", 11, "bold"),
+			text=progress_text,
+		)
 		device_name = "GPU" if driver.device.type == "cuda" else "CPU"
-		loss_text = f"  LAST LOSS {last_loss:.3f}" if last_loss is not None else ""
 		canvas.create_text(
 			canvas_width - 20, 18, anchor="ne", fill="white",
 			font=("Segoe UI", 11),
@@ -264,7 +278,7 @@ def run_gui() -> None:
 		canvas.create_text(
 			canvas_width - 20, 40, anchor="ne", fill="#b3e5fc",
 			font=("Segoe UI", 10),
-			text=f"TRAINING ON {device_name}  |  {driver.episodes_trained} runs{loss_text}",
+			text=f"TRAINING ON {device_name}  |  {driver.episodes_trained} updates",
 		)
 		if crash_message is not None:
 			canvas.create_rectangle(

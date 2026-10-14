@@ -1,2 +1,3 @@
 quantum/
-Quantum_wave_simulation/
+__pycache__/
+.vscode/
