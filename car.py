@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 import math
+import argparse
+from pathlib import Path
 from typing import Dict, Tuple
 
 import torch
@@ -98,7 +100,7 @@ class ProceduralTrack:
 			raise KeyError(f"chunk {index} is not loaded; call update(car_s) first") from exc
 
 
-def run_gui() -> None:
+def run_gui(device: str | None = None) -> None:
 	"""Watch a PyTorch driver learn to navigate procedural traffic."""
 	from collections import deque
 	import time
@@ -118,7 +120,10 @@ def run_gui() -> None:
 
 	track = ProceduralTrack(point_spacing=1.0, chunks_ahead=5)
 	simulation = DrivingSimulation(track=track, traffic_count=14, seed=17)
-	driver = OnlineDriver(simulation.OBSERVATION_SIZE)
+	if device is None:
+		driver = OnlineDriver(simulation.OBSERVATION_SIZE)
+	else:
+		driver = OnlineDriver(simulation.OBSERVATION_SIZE, device=device)
 	episode = 1
 	recent_runs: deque[tuple[float, int]] = deque(maxlen=20)
 	crash_message: str | None = None
@@ -302,5 +307,52 @@ def run_gui() -> None:
 	root.mainloop()
 
 
+def main() -> None:
+	parser = argparse.ArgumentParser(description="Procedural driving AI")
+	parser.add_argument(
+		"--mode",
+		choices=("gui", "headless"),
+		default="gui",
+		help="show the game or train batches of simulations without a window",
+	)
+	parser.add_argument(
+		"--device",
+		choices=("cuda", "cpu"),
+		default=None,
+		help="training device (headless defaults to CUDA; GUI auto-selects)",
+	)
+	parser.add_argument("--environments", type=int, default=1000)
+	parser.add_argument("--updates", type=int, default=1000)
+	parser.add_argument("--minibatch-size", type=int, default=4096)
+	parser.add_argument("--optimization-epochs", type=int, default=4)
+	parser.add_argument("--learning-rate-decay", type=float, default=0.995)
+	parser.add_argument("--checkpoint", type=Path)
+	parser.add_argument("--seed", type=int, default=17)
+	parser.add_argument("--report-every", type=int, default=1)
+	args = parser.parse_args()
+
+	if args.mode == "gui":
+		if args.device == "cuda" and not torch.cuda.is_available():
+			raise RuntimeError(
+				"CUDA was requested but is unavailable. Install CUDA-enabled "
+				"PyTorch and verify the NVIDIA driver."
+			)
+		run_gui(device=args.device)
+	else:
+		from car_training import train_headless
+
+		train_headless(
+			environments=args.environments,
+			updates=args.updates,
+			device=args.device or "cuda",
+			minibatch_size=args.minibatch_size,
+			optimization_epochs=args.optimization_epochs,
+			learning_rate_decay=args.learning_rate_decay,
+			checkpoint_path=args.checkpoint,
+			seed=args.seed,
+			report_every=args.report_every,
+		)
+
+
 if __name__ == "__main__":
-	run_gui()
+	main()

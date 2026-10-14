@@ -1,14 +1,50 @@
 """Small online policy-gradient driver for the procedural car game."""
 
 from pathlib import Path
+from array import array
+from dataclasses import dataclass, field
 import tempfile
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
+import uuid
+import warnings
 
 import torch
 from torch import Tensor, nn
 from torch.distributions import Categorical
 
 from car_simulation import Observation
+
+
+@dataclass
+class EpisodeRollout:
+	"""Compact CPU storage for one completed episode's training experience."""
+
+	observation_size: int
+	observations: array = field(default_factory=lambda: array("f"))
+	actions: array = field(default_factory=lambda: array("b"))
+	rewards: array = field(default_factory=lambda: array("f"))
+	log_probabilities: array = field(default_factory=lambda: array("f"))
+
+	def append(
+		self,
+		observation: Observation,
+		action: int,
+		reward: float,
+		log_probability: float,
+	) -> None:
+		if len(observation) != self.observation_size:
+			raise ValueError("observation size does not match the rollout")
+		if not 0 <= action <= 8:
+			raise ValueError("action must be between 0 and 8")
+		if not torch.isfinite(torch.tensor((reward, log_probability))).all().item():
+			raise ValueError("reward and log_probability must be finite")
+		self.observations.extend(observation)
+		self.actions.append(action)
+		self.rewards.append(reward)
+		self.log_probabilities.append(log_probability)
+
+	def __len__(self) -> int:
+		return len(self.actions)
 
 
 class DrivingPolicy(nn.Module):
@@ -103,13 +139,17 @@ class OnlineDriver:
 		return float(loss.detach().cpu().item())
 
 	def save_checkpoint(self) -> None:
-		"""Atomically save model and optimizer state beside the game source."""
+		"""Save a rotating generation to avoid replacing OneDrive-locked files."""
 		self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 		payload = {
 			"policy": self.policy.state_dict(),
 			"optimizer": self.optimizer.state_dict(),
 			"episodes_trained": self.episodes_trained,
 		}
+		generation_path = self.checkpoint_path.with_name(
+			f"{self.checkpoint_path.stem}_run_{self.episodes_trained:06d}_"
+			f"{uuid.uuid4().hex[:8]}{self.checkpoint_path.suffix}"
+		)
 		temporary_path: Path | None = None
 		try:
 			with tempfile.NamedTemporaryFile(
@@ -120,21 +160,321 @@ class OnlineDriver:
 			) as temporary_file:
 				temporary_path = Path(temporary_file.name)
 			torch.save(payload, temporary_path)
-			temporary_path.replace(self.checkpoint_path)
+			temporary_path.replace(generation_path)
 		finally:
 			if temporary_path is not None:
-				temporary_path.unlink(missing_ok=True)
+				try:
+					temporary_path.unlink(missing_ok=True)
+				except OSError as exc:
+					warnings.warn(
+						f"Could not remove temporary checkpoint {temporary_path}: {exc}",
+						RuntimeWarning,
+						stacklevel=2,
+					)
+
+		generations = self._checkpoint_generations()
+		for old_checkpoint in generations[5:]:
+			try:
+				old_checkpoint.unlink()
+			except OSError as exc:
+				warnings.warn(
+					f"Could not remove old checkpoint {old_checkpoint}: {exc}",
+					RuntimeWarning,
+					stacklevel=2,
+				)
+
+	def _checkpoint_generations(self) -> List[Path]:
+		"""Return generated checkpoints newest first."""
+		generation_marker = f"{self.checkpoint_path.stem}_run_"
+		generations = list(
+			self.checkpoint_path.parent.glob(
+				f"{self.checkpoint_path.stem}_run_*{self.checkpoint_path.suffix}"
+			)
+		)
+
+		def generation_key(path: Path) -> Tuple[int, int]:
+			generation = path.stem.removeprefix(generation_marker).split("_", 1)[0]
+			try:
+				episode = int(generation)
+			except ValueError:
+				episode = -1
+			return episode, path.stat().st_mtime_ns
+
+		return sorted(generations, key=generation_key, reverse=True)
 
 	def load_checkpoint(self) -> bool:
 		"""Load persisted training state, returning false only when no checkpoint exists."""
-		if not self.checkpoint_path.exists():
+		generations = self._checkpoint_generations()
+		source = generations[0] if generations else self.checkpoint_path
+		if not source.exists():
 			return False
 		checkpoint = torch.load(
-			self.checkpoint_path,
+			source,
 			map_location=self.device,
 			weights_only=True,
 		)
 		self.policy.load_state_dict(checkpoint["policy"])
 		self.optimizer.load_state_dict(checkpoint["optimizer"])
+		self.episodes_trained = int(checkpoint["episodes_trained"])
+		return True
+
+
+class SharedPolicyTrainer:
+	"""Train one shared policy from synchronized batches of parallel episodes."""
+
+	CHECKPOINT_VERSION = 1
+
+	def __init__(
+		self,
+		observation_size: int,
+		checkpoint_path: Path | str = Path(__file__).with_name(
+			"car_ai_shared_checkpoint_v1.pt"
+		),
+		device: torch.device | str = "cuda",
+		learning_rate: float = 3e-4,
+		minimum_learning_rate: float = 1e-5,
+		learning_rate_decay: float = 0.995,
+		gamma: float = 0.99,
+	) -> None:
+		if learning_rate <= 0 or minimum_learning_rate <= 0:
+			raise ValueError("learning rates must be positive")
+		if minimum_learning_rate > learning_rate:
+			raise ValueError("minimum_learning_rate cannot exceed learning_rate")
+		if not 0 < learning_rate_decay <= 1:
+			raise ValueError("learning_rate_decay must be in (0, 1]")
+		if not 0 < gamma <= 1:
+			raise ValueError("gamma must be in (0, 1]")
+		self.device = torch.device(device)
+		if self.device.type == "cuda" and not torch.cuda.is_available():
+			raise RuntimeError(
+				"CUDA was requested but is unavailable. Install a CUDA-enabled "
+				"PyTorch build and verify the NVIDIA driver with "
+				"`python -c \"import torch; print(torch.cuda.is_available())\"`."
+			)
+		if self.device.type == "cuda" and self.device.index is not None:
+			if self.device.index >= torch.cuda.device_count():
+				raise RuntimeError(f"CUDA device {self.device} is not available")
+
+		self.policy = DrivingPolicy(observation_size).to(self.device)
+		self.optimizer = torch.optim.AdamW(
+			self.policy.parameters(),
+			lr=learning_rate,
+			weight_decay=1e-4,
+		)
+		self.minimum_learning_rate = minimum_learning_rate
+		self.learning_rate = learning_rate
+		self.learning_rate_decay = learning_rate_decay
+		self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+			self.optimizer,
+			lr_lambda=lambda update: max(
+				self.minimum_learning_rate / self.learning_rate,
+				self.learning_rate_decay ** update,
+			),
+		)
+		self.checkpoint_path = Path(checkpoint_path)
+		self.gamma = gamma
+		self.updates_completed = 0
+		self.episodes_trained = 0
+		self.load_checkpoint()
+
+	def sample_actions(
+		self,
+		observations: Sequence[Observation],
+	) -> List[Tuple[int, float]]:
+		"""Sample actions for one lockstep batch without retaining autograd graphs."""
+		if not observations:
+			return []
+		states = torch.tensor(observations, dtype=torch.float32, device=self.device)
+		with torch.no_grad():
+			distribution = Categorical(logits=self.policy(states))
+			actions = distribution.sample()
+			log_probabilities = distribution.log_prob(actions)
+		return [
+			(int(action), float(log_probability))
+			for action, log_probability in zip(
+				actions.cpu().tolist(),
+				log_probabilities.cpu().tolist(),
+			)
+		]
+
+	def train_batch(
+		self,
+		episodes: Sequence[EpisodeRollout],
+		minibatch_size: int = 4096,
+		optimization_epochs: int = 4,
+	) -> float:
+		"""Apply clipped PPO updates to complete episodes in bounded minibatches."""
+		if minibatch_size <= 0 or optimization_epochs <= 0:
+			raise ValueError("minibatch_size and optimization_epochs must be positive")
+		if not episodes:
+			raise ValueError("at least one complete episode is required")
+
+		states: List[Tensor] = []
+		actions: List[int] = []
+		old_log_probabilities: List[float] = []
+		returns: List[float] = []
+		for episode in episodes:
+			if not len(episode):
+				raise ValueError("episodes must contain at least one transition")
+			if episode.observation_size != self.policy.layers[0].in_features:
+				raise ValueError("observation size does not match the policy")
+			if (
+				len(episode.observations) != len(episode) * episode.observation_size
+				or len(episode.rewards) != len(episode)
+				or len(episode.log_probabilities) != len(episode)
+			):
+				raise ValueError("episode rollout buffers are misaligned")
+			episode_rewards = torch.frombuffer(episode.rewards, dtype=torch.float32).tolist()
+			discounted_return = 0.0
+			episode_returns: List[float] = []
+			for reward in reversed(episode_rewards):
+				discounted_return = reward + self.gamma * discounted_return
+				episode_returns.append(discounted_return)
+			episode_returns.reverse()
+			states.append(
+				torch.frombuffer(episode.observations, dtype=torch.float32).reshape(
+					len(episode), episode.observation_size
+				)
+			)
+			actions.extend(episode.actions)
+			old_log_probabilities.extend(episode.log_probabilities)
+			returns.extend(episode_returns)
+
+		return_tensor = torch.tensor(returns, dtype=torch.float32)
+		return_tensor = (return_tensor - return_tensor.mean()) / (
+			return_tensor.std(unbiased=False) + 1e-6
+		)
+		state_tensor = torch.cat(states)
+		action_tensor = torch.tensor(actions, dtype=torch.long)
+		old_log_probability_tensor = torch.tensor(
+			old_log_probabilities, dtype=torch.float32
+		)
+		sample_count = len(actions)
+		loss_total = 0.0
+		minibatch_count = 0
+
+		for _ in range(optimization_epochs):
+			permutation = torch.randperm(sample_count)
+			for start in range(0, sample_count, minibatch_size):
+				indices = permutation[start : start + minibatch_size]
+				batch_states = state_tensor[indices].to(self.device)
+				batch_actions = action_tensor[indices].to(self.device)
+				batch_returns = return_tensor[indices].to(self.device)
+				distribution = Categorical(logits=self.policy(batch_states))
+				log_probabilities = distribution.log_prob(batch_actions)
+				ratios = torch.exp(
+					log_probabilities
+					- old_log_probability_tensor[indices].to(self.device)
+				)
+				clipped_ratios = torch.clamp(ratios, 0.8, 1.2)
+				policy_loss = -torch.minimum(
+					ratios * batch_returns,
+					clipped_ratios * batch_returns,
+				).mean()
+				loss = policy_loss - 0.01 * distribution.entropy().mean()
+
+				self.optimizer.zero_grad(set_to_none=True)
+				loss.backward()
+				nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+				self.optimizer.step()
+				loss_total += float(loss.detach().cpu())
+				minibatch_count += 1
+
+		self.scheduler.step()
+		self.episodes_trained += len(episodes)
+		self.updates_completed += 1
+		self.save_checkpoint()
+		return loss_total / minibatch_count
+
+	def save_checkpoint(self) -> None:
+		"""Persist training state as a generation to avoid replacing locked files."""
+		self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+		payload = {
+			"version": self.CHECKPOINT_VERSION,
+			"policy": self.policy.state_dict(),
+			"optimizer": self.optimizer.state_dict(),
+			"scheduler": self.scheduler.state_dict(),
+			"updates_completed": self.updates_completed,
+			"episodes_trained": self.episodes_trained,
+			"learning_rate": self.learning_rate,
+			"minimum_learning_rate": self.minimum_learning_rate,
+			"learning_rate_decay": self.learning_rate_decay,
+			"gamma": self.gamma,
+		}
+		generation_path = self.checkpoint_path.with_name(
+			f"{self.checkpoint_path.stem}_run_{self.updates_completed:06d}_"
+			f"{uuid.uuid4().hex[:8]}{self.checkpoint_path.suffix}"
+		)
+		temporary_path: Path | None = None
+		try:
+			with tempfile.NamedTemporaryFile(
+				prefix=f"{self.checkpoint_path.name}.",
+				suffix=".tmp",
+				dir=self.checkpoint_path.parent,
+				delete=False,
+			) as temporary_file:
+				temporary_path = Path(temporary_file.name)
+			torch.save(payload, temporary_path)
+			temporary_path.replace(generation_path)
+		finally:
+			if temporary_path is not None:
+				try:
+					temporary_path.unlink(missing_ok=True)
+				except OSError as exc:
+					warnings.warn(
+						f"Could not remove temporary checkpoint {temporary_path}: {exc}",
+						RuntimeWarning,
+						stacklevel=2,
+					)
+
+		for old_checkpoint in self._checkpoint_generations()[5:]:
+			try:
+				old_checkpoint.unlink()
+			except OSError as exc:
+				warnings.warn(
+					f"Could not remove old checkpoint {old_checkpoint}: {exc}",
+					RuntimeWarning,
+					stacklevel=2,
+				)
+
+	def _checkpoint_generations(self) -> List[Path]:
+		generation_pattern = (
+			f"{self.checkpoint_path.stem}_run_*{self.checkpoint_path.suffix}"
+		)
+		generations = list(self.checkpoint_path.parent.glob(generation_pattern))
+		prefix = f"{self.checkpoint_path.stem}_run_"
+
+		def generation_key(path: Path) -> Tuple[int, int]:
+			try:
+				update = int(path.stem.removeprefix(prefix).split("_", 1)[0])
+			except ValueError:
+				update = -1
+			return update, path.stat().st_mtime_ns
+
+		return sorted(generations, key=generation_key, reverse=True)
+
+	def load_checkpoint(self) -> bool:
+		"""Restore shared training state when its versioned checkpoint exists."""
+		generations = self._checkpoint_generations()
+		source = generations[0] if generations else self.checkpoint_path
+		if not source.exists():
+			return False
+		checkpoint = torch.load(
+			source,
+			map_location=self.device,
+			weights_only=True,
+		)
+		if checkpoint.get("version") != self.CHECKPOINT_VERSION:
+			raise RuntimeError(
+				f"Unsupported shared checkpoint version in {self.checkpoint_path}"
+			)
+		self.learning_rate = float(checkpoint["learning_rate"])
+		self.minimum_learning_rate = float(checkpoint["minimum_learning_rate"])
+		self.learning_rate_decay = float(checkpoint["learning_rate_decay"])
+		self.gamma = float(checkpoint["gamma"])
+		self.policy.load_state_dict(checkpoint["policy"])
+		self.optimizer.load_state_dict(checkpoint["optimizer"])
+		self.scheduler.load_state_dict(checkpoint["scheduler"])
+		self.updates_completed = int(checkpoint["updates_completed"])
 		self.episodes_trained = int(checkpoint["episodes_trained"])
 		return True

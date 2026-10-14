@@ -11,7 +11,11 @@ from unittest.mock import patch
 import torch
 from torch.distributions import Categorical
 
-from car_ai import OnlineDriver
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+	sys.path.insert(0, str(PROJECT_ROOT))
+
+from car_ai import EpisodeRollout, OnlineDriver, SharedPolicyTrainer
 from car_simulation import DrivingSimulation, TrafficCar
 
 
@@ -200,7 +204,8 @@ class OnlineDriverTests(unittest.TestCase):
 			loss = driver.finish_episode()
 
 			self.assertIsNotNone(loss)
-			self.assertTrue(checkpoint.is_file())
+			generations = list(checkpoint.parent.glob("driver_run_*.pt"))
+			self.assertEqual(len(generations), 1)
 			self.assertEqual(driver.episodes_trained, 1)
 			self.assertTrue(
 				any(
@@ -214,6 +219,47 @@ class OnlineDriverTests(unittest.TestCase):
 			for expected, actual in zip(driver.policy.parameters(), reloaded.policy.parameters()):
 				self.assertTrue(torch.equal(expected, actual))
 
+	def test_checkpoint_save_avoids_replacing_locked_base_file(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			checkpoint = Path(directory) / "driver.pt"
+			driver = OnlineDriver(DrivingSimulation.OBSERVATION_SIZE, checkpoint)
+			torch.save(
+				{
+					"policy": driver.policy.state_dict(),
+					"optimizer": driver.optimizer.state_dict(),
+					"episodes_trained": 4,
+				},
+				checkpoint,
+			)
+			original_contents = checkpoint.read_bytes()
+			driver = OnlineDriver(DrivingSimulation.OBSERVATION_SIZE, checkpoint)
+			for chosen_action, reward in ((0, 0.0), (8, 1.0)):
+				state = torch.full(
+					(DrivingSimulation.OBSERVATION_SIZE,),
+					float(chosen_action),
+					device=driver.device,
+				)
+				log_probability = Categorical(
+					logits=driver.policy(state)
+				).log_prob(torch.tensor(chosen_action, device=driver.device))
+				driver.record(log_probability, reward)
+
+			original_replace = Path.replace
+
+			def reject_existing_target(source: Path, target: Path) -> Path:
+				if target == checkpoint:
+					raise PermissionError("simulated OneDrive lock")
+				return original_replace(source, target)
+
+			with patch.object(Path, "replace", reject_existing_target):
+				driver.finish_episode()
+
+			self.assertEqual(checkpoint.read_bytes(), original_contents)
+			self.assertEqual(driver.episodes_trained, 5)
+			reloaded = OnlineDriver(DrivingSimulation.OBSERVATION_SIZE, checkpoint)
+			self.assertEqual(reloaded.episodes_trained, 5)
+			self.assertEqual(len(list(checkpoint.parent.glob("driver_run_*.pt"))), 1)
+
 	def test_episode_with_no_actions_does_not_update(self) -> None:
 		with tempfile.TemporaryDirectory() as directory:
 			driver = OnlineDriver(
@@ -223,6 +269,95 @@ class OnlineDriverTests(unittest.TestCase):
 
 			self.assertIsNone(driver.finish_episode())
 			self.assertEqual(driver.episodes_trained, 0)
+
+
+class SharedPolicyTrainerTests(unittest.TestCase):
+	def test_batched_update_decays_schedule_and_restores_checkpoint(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			checkpoint = Path(directory) / "shared.pt"
+			trainer = SharedPolicyTrainer(
+				DrivingSimulation.OBSERVATION_SIZE,
+				checkpoint_path=checkpoint,
+				device="cpu",
+				learning_rate_decay=0.5,
+			)
+			initial_rate = trainer.optimizer.param_groups[0]["lr"]
+			episodes = []
+			for episode_index in range(2):
+				rollout = EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+				for step in range(3):
+					observation = tuple(
+						float(episode_index + step) / 10.0
+						for _ in range(DrivingSimulation.OBSERVATION_SIZE)
+					)
+					with torch.no_grad():
+						distribution = Categorical(logits=trainer.policy(
+							torch.tensor(observation, dtype=torch.float32)
+						))
+						action = (episode_index + step) % 9
+						log_probability = float(
+							distribution.log_prob(torch.tensor(action))
+						)
+					rollout.append(observation, action, 1.0, log_probability)
+				episodes.append(rollout)
+
+			loss = trainer.train_batch(
+				episodes,
+				minibatch_size=3,
+				optimization_epochs=1,
+			)
+
+			self.assertTrue(torch.isfinite(torch.tensor(loss)))
+			self.assertEqual(trainer.updates_completed, 1)
+			self.assertEqual(trainer.episodes_trained, 2)
+			self.assertLess(trainer.optimizer.param_groups[0]["lr"], initial_rate)
+			generations = list(checkpoint.parent.glob("shared_run_*.pt"))
+			self.assertEqual(len(generations), 1)
+
+			reloaded = SharedPolicyTrainer(
+				DrivingSimulation.OBSERVATION_SIZE,
+				checkpoint_path=checkpoint,
+				device="cpu",
+				learning_rate_decay=0.99,
+			)
+			self.assertEqual(reloaded.updates_completed, 1)
+			self.assertEqual(reloaded.episodes_trained, 2)
+			self.assertEqual(reloaded.learning_rate_decay, 0.5)
+			self.assertEqual(
+				reloaded.optimizer.param_groups[0]["lr"],
+				trainer.optimizer.param_groups[0]["lr"],
+			)
+			for expected, actual in zip(
+				trainer.policy.parameters(), reloaded.policy.parameters()
+			):
+				self.assertTrue(torch.equal(expected, actual))
+
+	def test_action_sampling_batches_without_gradients(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			trainer = SharedPolicyTrainer(
+				DrivingSimulation.OBSERVATION_SIZE,
+				checkpoint_path=Path(directory) / "shared.pt",
+				device="cpu",
+			)
+
+			actions = trainer.sample_actions(
+				[
+					tuple(0.0 for _ in range(DrivingSimulation.OBSERVATION_SIZE)),
+					tuple(0.5 for _ in range(DrivingSimulation.OBSERVATION_SIZE)),
+				]
+			)
+
+			self.assertEqual(len(actions), 2)
+			self.assertTrue(all(action in range(9) for action, _ in actions))
+			self.assertEqual(trainer.sample_actions([]), [])
+
+	def test_cuda_request_fails_with_actionable_message_when_unavailable(self) -> None:
+		with patch("car_ai.torch.cuda.is_available", return_value=False):
+			with self.assertRaisesRegex(RuntimeError, "CUDA was requested"):
+				SharedPolicyTrainer(
+					DrivingSimulation.OBSERVATION_SIZE,
+					device="cuda",
+				)
 
 
 class GameGuiTests(unittest.TestCase):
