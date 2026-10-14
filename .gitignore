@@ -1,3 +1,16 @@
 quantum/
+.venv/
+venv/
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 .vscode/
+*.py[cod]
+car_ai_checkpoint*.pt
+car_ai_shared_checkpoint*.pt
+*.tmp
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/

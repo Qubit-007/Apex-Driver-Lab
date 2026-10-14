@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem in the simulator, training pipeline, or documentation.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: Please search existing issues first. Do not include credentials, private data, or checkpoint files.
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: Provide the commit hash or release/tag, if known.
+      placeholder: e.g. main @ abc1234
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and CPU/CUDA device.
+      placeholder: Windows 11, Python 3.12, CPU
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the command and minimal sequence needed to reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      render: text
+    validations:
+      required: true
