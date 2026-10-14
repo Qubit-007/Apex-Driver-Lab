@@ -1,4 +1,4 @@
-"""On-demand procedural track geometry and a small playable driving game."""
+"""On-demand procedural track geometry and an online-learning driving game."""
 
 from dataclasses import dataclass
 import math
@@ -99,12 +99,15 @@ class ProceduralTrack:
 
 
 def run_gui() -> None:
-	"""Drive along a scrolling, procedurally generated track."""
-	import tkinter as tk
+	"""Watch a PyTorch driver learn to navigate procedural traffic."""
 	import time
+	import tkinter as tk
+
+	from car_ai import OnlineDriver
+	from car_simulation import DrivingSimulation
 
 	root = tk.Tk()
-	root.title("AI car simulation")
+	root.title("Procedural Traffic AI")
 	root.geometry("800x600")
 	root.minsize(640, 480)
 	root.configure(bg="#254b35")
@@ -112,30 +115,55 @@ def run_gui() -> None:
 	canvas = tk.Canvas(root, width=800, height=600, bg="#254b35", highlightthickness=0)
 	canvas.pack(fill="both", expand=True)
 
-	track = ProceduralTrack(point_spacing=1.0, chunks_ahead=4)
-	pressed_keys = set()
-	distance = 0.0
-	lateral_position = 0.0
-	speed = 14.0
+	track = ProceduralTrack(point_spacing=1.0, chunks_ahead=5)
+	simulation = DrivingSimulation(track=track, traffic_count=14, seed=17)
+	driver = OnlineDriver(simulation.OBSERVATION_SIZE)
+	episode = 1
+	last_loss: float | None = None
+	crash_message: str | None = None
+	restart_at = 0.0
 	last_frame = time.perf_counter()
-	road_half_width = track.track_width / 2.0
-	car_half_width = 2.0
 
-	def on_key_press(event: tk.Event) -> None:
-		pressed_keys.add(event.keysym.lower())
-
-	def on_key_release(event: tk.Event) -> None:
-		pressed_keys.discard(event.keysym.lower())
-
-	root.bind("<KeyPress>", on_key_press)
-	root.bind("<KeyRelease>", on_key_release)
-	canvas.focus_set()
+	def draw_car(
+		distance: float,
+		lateral: float,
+		y: float,
+		color: str,
+		scale: float,
+		canvas_center: float,
+		road_center_x: float,
+	) -> None:
+		center_x = canvas_center + (
+			track.center_x_at(distance) + lateral - road_center_x
+		) * scale
+		half_width = 1.1 * scale
+		length = 2.0 * scale
+		canvas.create_polygon(
+			center_x - half_width * 0.8, y + length,
+			center_x - half_width, y + length * 0.45,
+			center_x - half_width, y - length * 0.65,
+			center_x - half_width * 0.55, y - length,
+			center_x + half_width * 0.55, y - length,
+			center_x + half_width, y - length * 0.65,
+			center_x + half_width, y + length * 0.45,
+			center_x + half_width * 0.8, y + length,
+			fill=color,
+			outline="white",
+			width=1,
+		)
+		canvas.create_polygon(
+			center_x - half_width * 0.65, y - length * 0.35,
+			center_x - half_width * 0.42, y - length * 0.78,
+			center_x + half_width * 0.42, y - length * 0.78,
+			center_x + half_width * 0.65, y - length * 0.35,
+			fill="#b3e5fc",
+			outline="",
+		)
 
 	def draw_frame() -> None:
-		nonlocal distance, lateral_position, speed, last_frame
-
+		nonlocal episode, last_loss, crash_message, restart_at, last_frame
 		now = time.perf_counter()
-		dt = min(now - last_frame, 0.1)
+		dt = max(0.001, min(now - last_frame, 0.1))
 		last_frame = now
 		canvas_width = max(canvas.winfo_width(), 640)
 		canvas_height = max(canvas.winfo_height(), 480)
@@ -143,32 +171,32 @@ def run_gui() -> None:
 		canvas_center = canvas_width / 2.0
 		car_y = canvas_height * 0.775
 
-		if "left" in pressed_keys:
-			lateral_position -= 9.0 * dt
-		if "right" in pressed_keys:
-			lateral_position += 9.0 * dt
-
-		is_on_road = abs(lateral_position) + car_half_width < road_half_width
-		if is_on_road:
-			if "up" in pressed_keys:
-				speed = min(32.0, speed + 16.0 * dt)
-			elif "down" in pressed_keys:
-				speed = max(0.0, speed - 28.0 * dt)
+		if crash_message is not None:
+			if now >= restart_at:
+				simulation.reset()
+				episode += 1
+				crash_message = None
 		else:
-			speed = max(0.0, speed - 20.0 * dt)
-		distance += speed * dt
+			action, log_probability = driver.choose_action(simulation.observe())
+			result = simulation.step(action, dt)
+			driver.record(log_probability, result.reward)
+			if result.done:
+				last_loss = driver.finish_episode()
+				crash_message = result.crash_reason or "episode complete"
+				restart_at = now + 1.0
 
-		# Keep some track behind the car for the bottom of the scrolling view.
-		chunks = track.update(max(0.0, distance - 35.0))
-		center_at_car = track.center_x_at(distance)
-		visible_start = distance - (canvas_height - car_y) / scale
-		visible_end = distance + car_y / scale
+		player = simulation.player
+		chunks = track.update(max(0.0, player.distance - 35.0))
+		# Anchor the camera to the road, not the AI's lateral offset.
+		road_center_x = track.center_x_at(player.distance)
+		visible_start = player.distance - (canvas_height - car_y) / scale
+		visible_end = player.distance + car_y / scale
 		road_points = []
 		for chunk in chunks:
 			for point, width in zip(chunk.points.tolist(), chunk.width.tolist()):
 				x, point_distance = point
 				if visible_start <= point_distance <= visible_end:
-					y = car_y - (point_distance - distance) * scale
+					y = car_y - (point_distance - player.distance) * scale
 					road_points.append((x, point_distance, width, y))
 
 		canvas.delete("all")
@@ -177,7 +205,7 @@ def run_gui() -> None:
 			right_edge = []
 			centerline = []
 			for x, point_distance, width, y in road_points:
-				center_x = canvas_center + (x - center_at_car) * scale
+				center_x = canvas_center + (x - road_center_x) * scale
 				half_width = width * scale / 2.0
 				left_edge.extend((center_x - half_width, y))
 				right_edge.extend((center_x + half_width, y))
@@ -197,46 +225,63 @@ def run_gui() -> None:
 						fill="#f4f4f4", width=3,
 					)
 
-		car_x = canvas_center + lateral_position * scale
-		car_length = 3.75 * scale
-		canvas.create_polygon(
-			car_x - car_half_width * scale * 0.75, car_y + car_length * 0.9,
-			car_x - car_half_width * scale, car_y + car_length * 0.4,
-			car_x - car_half_width * scale, car_y - car_length * 0.55,
-			car_x - car_half_width * scale * 0.6, car_y - car_length,
-			car_x + car_half_width * scale * 0.6, car_y - car_length,
-			car_x + car_half_width * scale, car_y - car_length * 0.55,
-			car_x + car_half_width * scale, car_y + car_length * 0.4,
-			car_x + car_half_width * scale * 0.75, car_y + car_length * 0.9,
-			fill="#e53935",
-			outline="white",
-			width=2,
-		)
-		canvas.create_polygon(
-			car_x - car_half_width * scale * 0.65, car_y - car_length * 0.5,
-			car_x - car_half_width * scale * 0.45, car_y - car_length * 0.82,
-			car_x + car_half_width * scale * 0.45, car_y - car_length * 0.82,
-			car_x + car_half_width * scale * 0.65, car_y - car_length * 0.5,
-			fill="#b3e5fc",
-			outline="",
+		for traffic_car in simulation.traffic:
+			if visible_start <= traffic_car.distance <= visible_end:
+				traffic_y = car_y - (traffic_car.distance - player.distance) * scale
+				color = ("#42a5f5", "#ffca28", "#ab47bc")[traffic_car.car_id % 3]
+				draw_car(
+					traffic_car.distance, traffic_car.lateral, traffic_y, color,
+					scale, canvas_center, road_center_x,
+				)
+		draw_car(
+			player.distance, player.lateral, car_y, "#e53935",
+			scale, canvas_center, road_center_x,
 		)
 
-		canvas.create_rectangle(12, 12, 270, 92, fill="#17211c", outline="")
+		canvas.create_rectangle(12, 12, 335, 116, fill="#17211c", outline="")
 		canvas.create_text(
 			26, 27, anchor="nw", fill="white",
-			font=("Consolas", 14, "bold"),
-			text=f"DISTANCE  {distance:07.1f} m",
+			font=("Consolas", 13, "bold"),
+			text=f"EPISODE   {episode:04d}   STEPS {simulation.steps:04d}",
 		)
 		canvas.create_text(
-			26, 53, anchor="nw", fill="#b3e5fc",
-			font=("Consolas", 14, "bold"),
-			text=f"SPEED     {speed * 3.6:05.1f} km/h",
+			26, 52, anchor="nw", fill="#b3e5fc",
+			font=("Consolas", 13, "bold"),
+			text=f"DISTANCE  {player.distance:07.1f} m",
 		)
 		canvas.create_text(
-			canvas_width - 26, 18, anchor="ne", fill="white",
+			26, 77, anchor="nw", fill="#a5d6a7",
+			font=("Consolas", 13, "bold"),
+			text=f"SPEED     {player.speed * 3.6:05.1f} km/h",
+		)
+		device_name = "GPU" if driver.device.type == "cuda" else "CPU"
+		loss_text = f"  LAST LOSS {last_loss:.3f}" if last_loss is not None else ""
+		canvas.create_text(
+			canvas_width - 20, 18, anchor="ne", fill="white",
 			font=("Segoe UI", 11),
-			text="← → steer    ↑ accelerate    ↓ brake",
+			text="TRAFFIC 20 km/h  |  AI MIN 40 km/h",
 		)
+		canvas.create_text(
+			canvas_width - 20, 40, anchor="ne", fill="#b3e5fc",
+			font=("Segoe UI", 10),
+			text=f"TRAINING ON {device_name}  |  {driver.episodes_trained} runs{loss_text}",
+		)
+		if crash_message is not None:
+			canvas.create_rectangle(
+				canvas_center - 190, canvas_height * 0.28,
+				canvas_center + 190, canvas_height * 0.43,
+				fill="#17211c", outline="#ef5350", width=2,
+			)
+			canvas.create_text(
+				canvas_center, canvas_height * 0.32,
+				fill="#ef5350", font=("Segoe UI", 20, "bold"),
+				text=crash_message.upper(),
+			)
+			canvas.create_text(
+				canvas_center, canvas_height * 0.38,
+				fill="white", font=("Segoe UI", 11),
+				text="Policy updated — restarting run",
+			)
 		root.after(33, draw_frame)
 
 	draw_frame()
