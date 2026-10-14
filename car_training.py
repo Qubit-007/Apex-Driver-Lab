@@ -17,9 +17,9 @@ def train_headless(
 	learning_rate_decay: float = 0.995,
 	checkpoint_path: Path | str | None = None,
 	seed: int = 17,
-	report_every: int = 1,
+	report_every: int = 1000,
 ) -> SharedPolicyTrainer:
-	"""Advance ``environments`` in lockstep and update after each shared batch."""
+	"""Run concurrent simulations and update the shared policy on each finish."""
 	if environments <= 0:
 		raise ValueError("environments must be positive")
 	if updates <= 0:
@@ -30,7 +30,7 @@ def train_headless(
 	checkpoint = (
 		Path(checkpoint_path)
 		if checkpoint_path is not None
-		else Path(__file__).with_name("car_ai_shared_checkpoint_v1.pt")
+		else Path(__file__).with_name("car_ai_shared_checkpoint_v2.pt")
 	)
 	trainer = SharedPolicyTrainer(
 		DrivingSimulation.OBSERVATION_SIZE,
@@ -55,54 +55,66 @@ def train_headless(
 			DrivingSimulation(track=track, traffic_count=14, seed=environment_seed)
 		)
 
-	for local_update in range(1, updates + 1):
-		rollouts = [
-			EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
-			for _ in simulations
-		]
-		active = list(range(environments))
-		while active:
-			observations = [simulations[index].observe() for index in active]
-			actions = trainer.sample_actions(observations)
-			next_active = []
-			for index, observation, (action, log_probability) in zip(
-				active, observations, actions
-			):
-				result = simulations[index].step(action, dt=1.0 / 30.0)
-				rollouts[index].append(
-					observation, action, result.reward, log_probability
-				)
-				if not result.done:
-					next_active.append(index)
-			active = next_active
+	rollouts = [
+		EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+		for _ in simulations
+	]
+	starting_update = trainer.updates_completed
+	target_update = starting_update + updates
+	report_count = 0
+	report_distance = 0.0
+	report_loss = 0.0
+	report_reasons: dict[str, int] = {}
 
-		loss = trainer.train_batch(
-			rollouts,
-			minibatch_size=minibatch_size,
-			optimization_epochs=optimization_epochs,
-		)
-		if local_update % report_every == 0 or local_update == updates:
-			mean_distance = sum(
-				simulation.player.distance for simulation in simulations
-			) / environments
-			reason_counts: dict[str, int] = {}
-			for simulation in simulations:
-				reason = simulation.crash_reason or "unknown"
-				reason_counts[reason] = reason_counts.get(reason, 0) + 1
-			reason_summary = ", ".join(
-				f"{reason}: {count}" for reason, count in sorted(reason_counts.items())
+	while trainer.updates_completed < target_update:
+		observations = [simulation.observe() for simulation in simulations]
+		actions = trainer.sample_actions(observations)
+		for index, observation, (action, log_probability) in zip(
+			range(environments), observations, actions
+		):
+			if trainer.updates_completed >= target_update:
+				break
+			simulation = simulations[index]
+			result = simulation.step(action, dt=1.0 / 30.0)
+			rollouts[index].append(
+				observation, action, result.reward, log_probability
 			)
-			learning_rate = trainer.optimizer.param_groups[0]["lr"]
-			print(
-				f"Update {trainer.updates_completed} "
-				f"({local_update}/{updates}) | "
-				f"{environments} episodes | "
-				f"mean distance {mean_distance:.1f} m | "
-				f"loss {loss:.4f} | lr {learning_rate:.2e} | "
-				f"{reason_summary}"
-			)
+			if not result.done:
+				continue
 
-		for simulation in simulations:
+			loss = trainer.train_episode(
+				rollouts[index],
+				batch_equivalent_size=environments,
+				minibatch_size=minibatch_size,
+				optimization_epochs=optimization_epochs,
+			)
+			report_count += 1
+			report_distance += simulation.player.distance
+			report_loss += loss
+			reason = result.crash_reason or "unknown"
+			report_reasons[reason] = report_reasons.get(reason, 0) + 1
+
 			simulation.reset()
+			rollouts[index] = EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+
+			if report_count >= report_every or trainer.updates_completed >= target_update:
+				reason_summary = ", ".join(
+					f"{name}: {count}"
+					for name, count in sorted(report_reasons.items())
+				)
+				print(
+					f"Completed {trainer.episodes_trained} episodes | "
+					f"updates {trainer.updates_completed}/"
+					f"{target_update} batch-equivalents | "
+					f"last {report_count} mean distance "
+					f"{report_distance / report_count:.1f} m | "
+					f"mean loss {report_loss / report_count:.4f} | "
+					f"lr {trainer.optimizer.param_groups[0]['lr']:.2e} | "
+					f"{reason_summary}"
+				)
+				report_count = 0
+				report_distance = 0.0
+				report_loss = 0.0
+				report_reasons.clear()
 
 	return trainer

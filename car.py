@@ -313,7 +313,7 @@ def main() -> None:
 		"--mode",
 		choices=("gui", "headless"),
 		default="gui",
-		help="show the game or train batches of simulations without a window",
+		help="show the game or train shared simulations without a window",
 	)
 	parser.add_argument(
 		"--device",
@@ -328,7 +328,7 @@ def main() -> None:
 	parser.add_argument("--learning-rate-decay", type=float, default=0.995)
 	parser.add_argument("--checkpoint", type=Path)
 	parser.add_argument("--seed", type=int, default=17)
-	parser.add_argument("--report-every", type=int, default=1)
+	parser.add_argument("--report-every", type=int, default=1000)
 	args = parser.parse_args()
 
 	if args.mode == "gui":

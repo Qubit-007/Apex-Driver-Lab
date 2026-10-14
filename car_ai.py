@@ -220,15 +220,15 @@ class OnlineDriver:
 
 
 class SharedPolicyTrainer:
-	"""Train one shared policy from synchronized batches of parallel episodes."""
+	"""Train one shared policy immediately from completed parallel episodes."""
 
-	CHECKPOINT_VERSION = 1
+	CHECKPOINT_VERSION = 2
 
 	def __init__(
 		self,
 		observation_size: int,
 		checkpoint_path: Path | str = Path(__file__).with_name(
-			"car_ai_shared_checkpoint_v1.pt"
+			"car_ai_shared_checkpoint_v2.pt"
 		),
 		device: torch.device | str = "cuda",
 		learning_rate: float = 3e-4,
@@ -275,13 +275,14 @@ class SharedPolicyTrainer:
 		self.gamma = gamma
 		self.updates_completed = 0
 		self.episodes_trained = 0
+		self.episodes_since_batch_equivalent = 0
 		self.load_checkpoint()
 
 	def sample_actions(
 		self,
 		observations: Sequence[Observation],
 	) -> List[Tuple[int, float]]:
-		"""Sample actions for one lockstep batch without retaining autograd graphs."""
+		"""Sample a batch of actions without retaining autograd graphs."""
 		if not observations:
 			return []
 		states = torch.tensor(observations, dtype=torch.float32, device=self.device)
@@ -304,6 +305,49 @@ class SharedPolicyTrainer:
 		optimization_epochs: int = 4,
 	) -> float:
 		"""Apply clipped PPO updates to complete episodes in bounded minibatches."""
+		loss = self._optimize_episodes(
+			episodes,
+			minibatch_size=minibatch_size,
+			optimization_epochs=optimization_epochs,
+		)
+		self.scheduler.step()
+		self.episodes_trained += len(episodes)
+		self.episodes_since_batch_equivalent = 0
+		self.updates_completed += 1
+		self.save_checkpoint()
+		return loss
+
+	def train_episode(
+		self,
+		episode: EpisodeRollout,
+		batch_equivalent_size: int,
+		minibatch_size: int = 4096,
+		optimization_epochs: int = 4,
+	) -> float:
+		"""Update immediately from one completed run; schedule/save per equivalent."""
+		if batch_equivalent_size <= 0:
+			raise ValueError("batch_equivalent_size must be positive")
+		loss = self._optimize_episodes(
+			[episode],
+			minibatch_size=minibatch_size,
+			optimization_epochs=optimization_epochs,
+		)
+		self.episodes_trained += 1
+		self.episodes_since_batch_equivalent += 1
+		if self.episodes_since_batch_equivalent >= batch_equivalent_size:
+			self.episodes_since_batch_equivalent -= batch_equivalent_size
+			self.scheduler.step()
+			self.updates_completed += 1
+			self.save_checkpoint()
+		return loss
+
+	def _optimize_episodes(
+		self,
+		episodes: Sequence[EpisodeRollout],
+		minibatch_size: int,
+		optimization_epochs: int,
+	) -> float:
+		"""Optimize PPO policy weights without advancing checkpoint cadence."""
 		if minibatch_size <= 0 or optimization_epochs <= 0:
 			raise ValueError("minibatch_size and optimization_epochs must be positive")
 		if not episodes:
@@ -380,10 +424,6 @@ class SharedPolicyTrainer:
 				loss_total += float(loss.detach().cpu())
 				minibatch_count += 1
 
-		self.scheduler.step()
-		self.episodes_trained += len(episodes)
-		self.updates_completed += 1
-		self.save_checkpoint()
 		return loss_total / minibatch_count
 
 	def save_checkpoint(self) -> None:
@@ -396,6 +436,7 @@ class SharedPolicyTrainer:
 			"scheduler": self.scheduler.state_dict(),
 			"updates_completed": self.updates_completed,
 			"episodes_trained": self.episodes_trained,
+			"episodes_since_batch_equivalent": self.episodes_since_batch_equivalent,
 			"learning_rate": self.learning_rate,
 			"minimum_learning_rate": self.minimum_learning_rate,
 			"learning_rate_decay": self.learning_rate_decay,
@@ -477,4 +518,7 @@ class SharedPolicyTrainer:
 		self.scheduler.load_state_dict(checkpoint["scheduler"])
 		self.updates_completed = int(checkpoint["updates_completed"])
 		self.episodes_trained = int(checkpoint["episodes_trained"])
+		self.episodes_since_batch_equivalent = int(
+			checkpoint["episodes_since_batch_equivalent"]
+		)
 		return True

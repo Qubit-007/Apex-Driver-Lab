@@ -359,6 +359,166 @@ class SharedPolicyTrainerTests(unittest.TestCase):
 					device="cuda",
 				)
 
+	def test_single_episode_updates_immediately_and_checkpoints_per_equivalent(self) -> None:
+		with tempfile.TemporaryDirectory() as directory:
+			checkpoint = Path(directory) / "shared_v2.pt"
+			trainer = SharedPolicyTrainer(
+				DrivingSimulation.OBSERVATION_SIZE,
+				checkpoint_path=checkpoint,
+				device="cpu",
+				learning_rate_decay=0.5,
+			)
+			initial_rate = trainer.optimizer.param_groups[0]["lr"]
+			observation = tuple(
+				0.1 for _ in range(DrivingSimulation.OBSERVATION_SIZE)
+			)
+
+			def completed_episode() -> EpisodeRollout:
+				action, log_probability = trainer.sample_actions([observation])[0]
+				episode = EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+				episode.append(observation, action, 1.0, log_probability)
+				return episode
+
+			first_loss = trainer.train_episode(
+				completed_episode(),
+				batch_equivalent_size=2,
+				minibatch_size=8,
+				optimization_epochs=1,
+			)
+			self.assertTrue(torch.isfinite(torch.tensor(first_loss)))
+			self.assertEqual(trainer.episodes_trained, 1)
+			self.assertEqual(trainer.updates_completed, 0)
+			self.assertEqual(trainer.episodes_since_batch_equivalent, 1)
+			self.assertEqual(trainer.optimizer.param_groups[0]["lr"], initial_rate)
+			self.assertEqual(list(checkpoint.parent.glob("shared_v2_run_*.pt")), [])
+
+			second_loss = trainer.train_episode(
+				completed_episode(),
+				batch_equivalent_size=2,
+				minibatch_size=8,
+				optimization_epochs=1,
+			)
+			self.assertTrue(torch.isfinite(torch.tensor(second_loss)))
+			self.assertEqual(trainer.episodes_trained, 2)
+			self.assertEqual(trainer.updates_completed, 1)
+			self.assertEqual(trainer.episodes_since_batch_equivalent, 0)
+			self.assertLess(trainer.optimizer.param_groups[0]["lr"], initial_rate)
+			generations = list(checkpoint.parent.glob("shared_v2_run_*.pt"))
+			self.assertEqual(len(generations), 1)
+			payload = torch.load(generations[0], map_location="cpu", weights_only=True)
+			self.assertEqual(payload["version"], 2)
+
+			reloaded = SharedPolicyTrainer(
+				DrivingSimulation.OBSERVATION_SIZE,
+				checkpoint_path=checkpoint,
+				device="cpu",
+			)
+			self.assertEqual(reloaded.episodes_trained, 2)
+			self.assertEqual(reloaded.updates_completed, 1)
+			self.assertEqual(reloaded.episodes_since_batch_equivalent, 0)
+			self.assertEqual(
+				reloaded.optimizer.param_groups[0]["lr"],
+				trainer.optimizer.param_groups[0]["lr"],
+			)
+
+
+class HeadlessTrainingTests(unittest.TestCase):
+	def test_finished_environment_updates_and_restarts_while_others_continue(self) -> None:
+		events = []
+		simulations = []
+
+		class FakeSimulation:
+			OBSERVATION_SIZE = 1
+
+			def __init__(self, **_kwargs) -> None:
+				self.index = len(simulations)
+				self.total_steps = 0
+				self.player = types.SimpleNamespace(distance=0.0)
+				self.reset_count = 0
+				simulations.append(self)
+
+			def observe(self):
+				return (float(self.index),)
+
+			def step(self, _action: int, dt: float):
+				self.total_steps += 1
+				self.player.distance += dt
+				done = (
+					(self.index == 0 and self.total_steps == 1)
+					or (self.index == 1 and self.total_steps == 3)
+				)
+				events.append(("step", self.index, self.total_steps))
+				return types.SimpleNamespace(
+					reward=1.0,
+					done=done,
+					crash_reason="test crash" if done else None,
+				)
+
+			def reset(self) -> None:
+				self.reset_count += 1
+				events.append(("reset", self.index, self.reset_count))
+				self.player.distance = 0.0
+
+		class FakeTrainer:
+			def __init__(self, *_args, **_kwargs) -> None:
+				self.device = torch.device("cpu")
+				self.episodes_trained = 0
+				self.updates_completed = 0
+				self.optimizer_steps = 0
+				self.optimizer = types.SimpleNamespace(
+					param_groups=[{"lr": 3e-4}]
+				)
+
+			def sample_actions(self, observations):
+				events.append(("sample", self.optimizer_steps))
+				return [(4, -0.5) for _ in observations]
+
+			def train_episode(
+				self,
+				episode,
+				batch_equivalent_size,
+				minibatch_size,
+				optimization_epochs,
+			):
+				self.episodes_trained += 1
+				self.optimizer_steps += 1
+				events.append(
+					("train", len(episode), batch_equivalent_size)
+				)
+				if self.episodes_trained % batch_equivalent_size == 0:
+					self.updates_completed += 1
+				return 0.25
+
+		from car_training import train_headless
+
+		with patch("car_training.DrivingSimulation", FakeSimulation), patch(
+			"car_training.SharedPolicyTrainer", FakeTrainer
+		), patch("builtins.print"):
+			trainer = train_headless(
+				environments=2,
+				updates=1,
+				device="cpu",
+				minibatch_size=8,
+				optimization_epochs=1,
+				report_every=100,
+			)
+
+		self.assertEqual(trainer.episodes_trained, 2)
+		self.assertEqual(trainer.updates_completed, 1)
+		self.assertEqual([simulation.reset_count for simulation in simulations], [1, 1])
+		self.assertEqual(
+			[item for item in events if item[0] == "train"],
+			[("train", 1, 2), ("train", 3, 2)],
+		)
+		self.assertEqual(
+			[item for item in events if item[0] == "sample"],
+			[("sample", 0), ("sample", 1), ("sample", 1)],
+		)
+		self.assertLess(
+			events.index(("reset", 0, 1)),
+			events.index(("step", 1, 2)),
+		)
+
 
 class GameGuiTests(unittest.TestCase):
 	def test_gui_runs_multiple_ai_frames_headlessly(self) -> None:
