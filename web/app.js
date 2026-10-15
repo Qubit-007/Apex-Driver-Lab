@@ -82,6 +82,33 @@ function trackCenter(z) {
 	return Math.sin((z + 18) * 0.024) * 13 + Math.sin((z - 10) * 0.061) * 3.3;
 }
 
+function trackSlope(z) {
+	const sampleDistance = 0.25;
+	return (
+		trackCenter(z + sampleDistance) - trackCenter(z - sampleDistance)
+	) / (2 * sampleDistance);
+}
+
+function trackPoint(distance, laneOffset, referenceDistance) {
+	const slope = trackSlope(-distance);
+	const normalLength = Math.hypot(1.1, slope);
+	return new THREE.Vector3(
+		trackCenter(-distance) + laneOffset * 1.1 / normalLength,
+		0,
+		5 - (distance - referenceDistance) * 1.1 - laneOffset * slope / normalLength,
+	);
+}
+
+function dampAngle(current, target, rate, dt) {
+	const difference = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+	return current + difference * (1 - Math.exp(-rate * dt));
+}
+
+function smoothstep(value) {
+	const clamped = THREE.MathUtils.clamp(value, 0, 1);
+	return clamped * clamped * (3 - 2 * clamped);
+}
+
 function stripMesh(side, innerOffset, width, material, y) {
 	const positions = new Float32Array((roadSegments + 1) * 2 * 3);
 	const indices = [];
@@ -95,7 +122,11 @@ function stripMesh(side, innerOffset, width, material, y) {
 		], vertex);
 		if (index < roadSegments) {
 			const vertex = index * 2;
-			indices.push(vertex, vertex + 1, vertex + 2, vertex + 1, vertex + 3, vertex + 2);
+			if (side < 0) {
+				indices.push(vertex, vertex + 2, vertex + 1, vertex + 1, vertex + 2, vertex + 3);
+			} else {
+				indices.push(vertex, vertex + 1, vertex + 2, vertex + 1, vertex + 3, vertex + 2);
+			}
 		}
 	}
 	const geometry = new THREE.BufferGeometry();
@@ -116,28 +147,51 @@ roadRoot.add(stripMesh(1, roadWidth / 2, 2.5, shoulderMaterial, 0.005));
 function createRoadMarkings() {
 	const group = new THREE.Group();
 	group.userData.movingFeatures = [];
-	const dashGeometry = new THREE.BoxGeometry(0.12, 0.035, 3.1);
+	const addMarking = (length, width, material, laneOffset, trackZ, y) => {
+		const marking = createCurvedMarking(length, width, material, laneOffset, trackZ, y);
+		group.add(marking);
+		group.userData.movingFeatures.push(marking);
+	};
 	for (let z = 36; z > -roadLength + 45; z -= 9) {
-		const dash = new THREE.Mesh(dashGeometry, centerMaterial);
-		dash.userData.trackZ = z - 5;
-		dash.userData.laneOffset = 0;
-		dash.position.set(trackCenter(dash.userData.trackZ), 0.035, z);
-		group.add(dash);
-		group.userData.movingFeatures.push(dash);
+		addMarking(3.1, 0.12, centerMaterial, 0, z - 5, 0.035);
 	}
-	const edgeGeometry = new THREE.BoxGeometry(0.12, 0.04, 0.9);
 	for (let z = 42; z > -roadLength + 45; z -= 1.8) {
 		const stripeMaterial = curbMaterials[Math.floor((42 - z) / 1.8) % 2];
 		for (const side of [-1, 1]) {
-			const curb = new THREE.Mesh(edgeGeometry, stripeMaterial);
-			curb.userData.trackZ = z - 5;
-			curb.userData.laneOffset = side * (roadWidth / 2 - 0.08);
-			curb.position.set(trackCenter(curb.userData.trackZ) + curb.userData.laneOffset, 0.045, z);
-			group.add(curb);
-			group.userData.movingFeatures.push(curb);
+			addMarking(
+				0.9,
+				0.12,
+				stripeMaterial,
+				side * (roadWidth / 2 - 0.08),
+				z - 5,
+				0.045,
+			);
 		}
 	}
 	return group;
+}
+
+function createCurvedMarking(length, width, material, laneOffset, trackZ, y) {
+	const segments = Math.max(1, Math.ceil(length / 0.45));
+	const positions = new Float32Array((segments + 1) * 2 * 3);
+	const indices = [];
+	for (let index = 0; index < segments; index += 1) {
+		const vertex = index * 2;
+		indices.push(vertex, vertex + 2, vertex + 1, vertex + 1, vertex + 2, vertex + 3);
+	}
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+	geometry.setIndex(indices);
+	const marking = new THREE.Mesh(geometry, material);
+	marking.userData.trackZ = trackZ;
+	marking.userData.laneOffset = laneOffset;
+	marking.userData.length = length;
+	marking.userData.width = width;
+	marking.userData.segments = segments;
+	marking.userData.y = y;
+	marking.userData.movingMarking = true;
+	marking.receiveShadow = true;
+	return marking;
 }
 const roadMarkings = createRoadMarkings();
 scene.add(roadMarkings);
@@ -191,8 +245,17 @@ function trafficStartDistance(index, offset = 0) {
 	return 35 + index * 32 + offset;
 }
 
+function resetTrafficCars() {
+	const lanes = [-3.4, 0, 3.4];
+	for (const car of cars) {
+		car.userData.distance = trafficStartDistance(car.userData.index, Math.random() * 14);
+		car.userData.lane = lanes[Math.floor(Math.random() * lanes.length)];
+	}
+}
+
 function makeCar(color, isPlayer = false) {
 	const car = new THREE.Group();
+	car.rotation.order = 'YXZ';
 	const paint = new THREE.MeshStandardMaterial({
 		color,
 		metalness: 0.24,
@@ -227,16 +290,21 @@ function makeCar(color, isPlayer = false) {
 	rearGlass.rotation.x = 0.26;
 	car.add(rearGlass);
 	const wheels = [];
+	const frontWheelPivots = [];
 	const wheelGeometry = new THREE.CylinderGeometry(0.34, 0.34, 0.2, 12);
 	const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x111514, roughness: 0.83 });
 	for (const x of [-0.94, 0.94]) {
 		for (const z of [-1.18, 1.2]) {
+			const front = z < 0;
+			const wheelPivot = new THREE.Group();
+			wheelPivot.position.set(x, 0.36, z);
 			const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
 			wheel.rotation.z = Math.PI / 2;
-			wheel.position.set(x, 0.36, z);
 			wheel.castShadow = true;
-			car.add(wheel);
+			wheelPivot.add(wheel);
+			car.add(wheelPivot);
 			wheels.push(wheel);
+			if (front) frontWheelPivots.push(wheelPivot);
 		}
 	}
 	const lampMaterial = new THREE.MeshStandardMaterial({
@@ -263,6 +331,8 @@ function makeCar(color, isPlayer = false) {
 	shadow.position.y = 0.025;
 	car.add(shadow);
 	car.userData.wheels = wheels;
+	car.userData.frontWheelPivots = frontWheelPivots;
+	car.userData.roll = 0;
 	return car;
 }
 
@@ -277,6 +347,7 @@ const state = {
 	lateral: 0,
 	steering: 0,
 	targetSteering: 0,
+	laneChange: null,
 	throttle: 0.62,
 	paused: false,
 	manualUntil: 0,
@@ -377,7 +448,7 @@ function nearestCar() {
 
 function autonomousControl(trafficAhead, dt) {
 	const curve = Math.sin((state.distance + 16) * 0.024) * 0.4;
-	let steeringTarget = THREE.MathUtils.clamp(-state.lateral * 0.1 - state.steering * 0.55 - curve, -0.6, 0.6);
+	let steeringTarget = THREE.MathUtils.clamp(-state.lateral * 0.1 - state.steering * 0.55, -0.6, 0.6);
 	if (state.avoidanceCar && state.avoidanceCar.userData.distance - state.distance <= -6) {
 		state.avoidanceCar = null;
 		state.avoidanceTarget = null;
@@ -401,6 +472,16 @@ function autonomousControl(trafficAhead, dt) {
 		if (candidates.length) {
 			state.avoidanceCar = trafficAhead.laneCar;
 			state.avoidanceTarget = candidates[0].lane;
+			state.laneChange = {
+				start: state.lateral,
+				target: state.avoidanceTarget,
+				elapsed: 0,
+				duration: Math.max(
+					0.8,
+					1.5 * Math.abs(state.avoidanceTarget - state.lateral)
+						/ (Math.max(state.speed, 11.2) * Math.tan(12 * Math.PI / 180)),
+				),
+			};
 		}
 	}
 	if (state.avoidanceCar) {
@@ -418,6 +499,60 @@ function autonomousControl(trafficAhead, dt) {
 	state.safeSpeed = Math.max(11.2, Math.min(curveLimit, trafficLimit));
 	const throttleDemand = THREE.MathUtils.clamp((state.safeSpeed - state.speed) * 0.4, -1, 1);
 	state.throttle = smooth(state.throttle, throttleDemand, 2.2, dt);
+}
+
+function laneChangeOffset(secondsAhead = 0) {
+	const change = state.laneChange;
+	if (!change) return state.lateral;
+	const progress = (change.elapsed + secondsAhead) / change.duration;
+	return THREE.MathUtils.lerp(change.start, change.target, smoothstep(progress));
+}
+
+function updateCarPose(car, distance, laneOffset, speed, dt, referenceDistance, offsetAtDistance = () => laneOffset, steering = 0) {
+	const ahead = 1.5 + Math.min(speed, 32) * 0.12;
+	const sampleSpacing = 0.8;
+	const offsetAtTime = (distanceAhead) => offsetAtDistance(distanceAhead / Math.max(speed, 1));
+	const pointAt = (distanceAhead) => trackPoint(
+		distance + distanceAhead,
+		offsetAtTime(distanceAhead),
+		referenceDistance,
+	);
+	const headingBetween = (distanceAhead, varyingOffset) => {
+		const pointAtHeading = (sampleDistance) => varyingOffset
+			? pointAt(sampleDistance)
+			: trackPoint(distance + sampleDistance, laneOffset, referenceDistance);
+		const start = pointAtHeading(distanceAhead - sampleSpacing / 2);
+		const end = pointAtHeading(distanceAhead + sampleSpacing / 2);
+		return Math.atan2(-(end.x - start.x), -(end.z - start.z));
+	};
+	const pathYaw = headingBetween(ahead, true);
+	const laneYaw = headingBetween(ahead, false);
+	const laneChangeYaw = Math.atan2(Math.sin(pathYaw - laneYaw), Math.cos(pathYaw - laneYaw));
+	const targetYaw = state.laneChange
+		? laneYaw + THREE.MathUtils.clamp(laneChangeYaw, -12 * Math.PI / 180, 12 * Math.PI / 180)
+		: pathYaw;
+	const curvature = Math.atan2(
+		Math.sin(headingBetween(ahead + 0.8, true) - headingBetween(ahead - 0.8, true)),
+		Math.cos(headingBetween(ahead + 0.8, true) - headingBetween(ahead - 0.8, true)),
+	) / 1.6;
+
+	car.position.copy(trackPoint(distance, laneOffset, referenceDistance));
+	car.rotation.y = dampAngle(car.rotation.y, targetYaw, 6, dt);
+	car.userData.roll = THREE.MathUtils.damp(
+		car.userData.roll,
+		THREE.MathUtils.clamp(-curvature * speed * 0.48, -0.12, 0.12),
+		4.5,
+		dt,
+	);
+	car.rotation.z = car.userData.roll;
+	for (const pivot of car.userData.frontWheelPivots) {
+		pivot.rotation.y = THREE.MathUtils.damp(
+			pivot.rotation.y,
+			THREE.MathUtils.clamp(-steering * 0.24, -0.22, 0.22),
+			9,
+			dt,
+		);
+	}
 }
 
 function collidesWithTraffic(car, startDistance, startLateral, endDistance, endLateral) {
@@ -440,7 +575,29 @@ function update(dt) {
 	}
 	state.steering = smooth(state.steering, state.targetSteering, 2.2, dt);
 	state.steering = THREE.MathUtils.clamp(state.steering, -0.9, 0.9);
-	state.lateral += state.steering * dt * 4.1;
+	if (state.laneChange) {
+		state.laneChange.elapsed += dt;
+		const progress = THREE.MathUtils.clamp(
+			state.laneChange.elapsed / state.laneChange.duration,
+			0,
+			1,
+		);
+		state.lateral = laneChangeOffset();
+		state.steering = THREE.MathUtils.clamp(
+			(state.laneChange.target - state.laneChange.start)
+				* 6 * progress * (1 - progress)
+				/ (state.laneChange.duration * 4.1),
+			-0.9,
+			0.9,
+		);
+		if (state.laneChange.elapsed >= state.laneChange.duration) {
+			state.lateral = state.laneChange.target;
+			state.steering = 0;
+			state.laneChange = null;
+		}
+	} else {
+		state.lateral += state.steering * dt * 4.1;
+	}
 	state.lateral = THREE.MathUtils.clamp(state.lateral, -safeLateralLimit, safeLateralLimit);
 	state.speed = THREE.MathUtils.clamp(state.speed + state.throttle * 5.3 * dt, 11.2, 32);
 	state.distance += state.speed * dt;
@@ -448,9 +605,6 @@ function update(dt) {
 	let crash = false;
 	for (const car of cars) {
 		car.userData.distance += car.userData.speed * dt;
-		const gap = car.userData.distance - state.distance;
-		car.position.x = trackCenter(-car.userData.distance) + car.userData.lane;
-		car.position.z = 5 - gap * 1.1;
 		if (collidesWithTraffic(car, startDistance, startLateral, state.distance, state.lateral)) crash = true;
 	}
 	if (crash) {
@@ -461,36 +615,50 @@ function update(dt) {
 		state.speed = 11.2;
 		state.steering = 0;
 		state.targetSteering = 0;
+		state.laneChange = null;
 		state.avoidanceCar = null;
 		state.avoidanceTarget = null;
-		for (const car of cars) {
-			car.userData.distance += 90 + Math.random() * 35;
-		}
+		resetTrafficCars();
 	}
 	for (const car of cars) {
 		if (car.userData.distance - state.distance < -18) {
 			car.userData.distance += 220;
 			car.userData.lane = [-3.4, 0, 3.4][Math.floor(Math.random() * 3)];
 		}
-		car.position.x = trackCenter(-car.userData.distance) + car.userData.lane;
-		car.position.z = 5 - (car.userData.distance - state.distance) * 1.1;
-	}
-
-	playerCar.position.x = trackCenter(-state.distance) + state.lateral;
-	playerCar.position.z = 5;
-	playerCar.rotation.y = -Math.atan2(state.steering * 4.1, Math.max(11.2, state.speed));
-	for (const wheel of playerCar.userData.wheels) wheel.rotation.x += state.speed * dt * 0.45;
-	for (const car of cars) {
+		updateCarPose(car, car.userData.distance, car.userData.lane, car.userData.speed, dt, state.distance);
 		for (const wheel of car.userData.wheels) wheel.rotation.x += car.userData.speed * dt * 0.45;
 	}
 
+	updateCarPose(
+		playerCar,
+		state.distance,
+		state.lateral,
+		state.speed,
+		dt,
+		state.distance,
+		(secondsAhead) => state.laneChange
+			? laneChangeOffset(secondsAhead)
+			: THREE.MathUtils.clamp(
+				state.lateral + state.steering * 4.1 * secondsAhead,
+				-safeLateralLimit,
+				safeLateralLimit,
+			),
+		state.steering,
+	);
+	for (const wheel of playerCar.userData.wheels) wheel.rotation.x += state.speed * dt * 0.45;
+
 	updateTrackView();
 	const curve = trackCenter(-state.distance - 18) - trackCenter(-state.distance);
-	const cameraX = trackCenter(-state.distance) + state.lateral * 0.25 + curve * 0.15;
+	const cameraX = playerCar.position.x * 0.85 + trackCenter(-state.distance) * 0.15 + curve * 0.15;
 	camera.position.x = smooth(camera.position.x, cameraX, 2.5, dt);
 	camera.position.y = smooth(camera.position.y, 9.2 + Math.abs(curve) * 0.035, 2, dt);
 	camera.position.z = smooth(camera.position.z, 19, 2, dt);
-	camera.lookAt(trackCenter(-state.distance - 24) + state.lateral * 0.1, 0.3, -23);
+	camera.userData.yaw = dampAngle(camera.userData.yaw ?? playerCar.rotation.y, playerCar.rotation.y, 2.2, dt);
+	camera.lookAt(
+		camera.position.x - Math.sin(camera.userData.yaw) * 30,
+		0.3,
+		camera.position.z - Math.cos(camera.userData.yaw) * 30,
+	);
 	ground.position.x = trackCenter(-state.distance - 60) * 0.3;
 
 	const nearest = nearestCar();
@@ -524,8 +692,26 @@ function updateTrackView() {
 			feature.userData.trackZ += roadLength;
 			offset += roadLength;
 		}
-		feature.position.x = trackCenter(-state.distance + offset) + feature.userData.laneOffset;
-		feature.position.z = 5 + offset;
+		const data = feature.userData;
+		const positions = feature.geometry.attributes.position;
+		for (let index = 0; index <= data.segments; index += 1) {
+			const along = (index / data.segments - 0.5) * data.length;
+			const centerlineDistance = data.trackZ + along;
+			const slope = trackSlope(centerlineDistance);
+			const normalScale = 1 / Math.sqrt(1 + slope * slope);
+			for (let edge = 0; edge < 2; edge += 1) {
+				const lateral = data.laneOffset + (edge === 0 ? -data.width / 2 : data.width / 2);
+				const vertex = index * 2 + edge;
+				positions.setXYZ(
+					vertex,
+					trackCenter(centerlineDistance) + lateral * normalScale,
+					data.y,
+					5 + data.trackZ + state.distance + along - lateral * slope * normalScale,
+				);
+			}
+		}
+		positions.needsUpdate = true;
+		feature.geometry.computeVertexNormals();
 	}
 
 	for (const tree of scenery) {
@@ -580,6 +766,7 @@ function render(now) {
 }
 
 function applyManualSteer(direction) {
+	if (manualSteeringInputs.size) state.laneChange = null;
 	state.manualUntil = performance.now() + 800;
 	state.targetSteering = manualSteeringInputs.size
 		? [...manualSteeringInputs.values()].at(-1)
@@ -667,15 +854,13 @@ function resetRun() {
 	state.speed = 20;
 	state.steering = 0;
 	state.targetSteering = 0;
+	state.laneChange = null;
 	state.avoidanceCar = null;
 	state.avoidanceTarget = null;
 	state.throttle = 0.62;
 	state.episode += 1;
 	state.manualUntil = 0;
-	for (const car of cars) {
-		car.userData.distance = trafficStartDistance(car.userData.index, Math.random() * 14);
-		car.userData.lane = [-3.4, 0, 3.4][Math.floor(Math.random() * 3)];
-	}
+	resetTrafficCars();
 	ui.throttle.value = 62;
 	clock.getDelta();
 	updateHud();
