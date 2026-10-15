@@ -68,25 +68,31 @@ const curbMaterials = [
 ];
 const centerMaterial = new THREE.MeshStandardMaterial({ color: 0xe1e4d7, roughness: 0.8 });
 const roadSegments = 180;
-const roadLength = 260;
+const roadLength = 270;
 const roadWidth = 12;
 const segmentLength = roadLength / roadSegments;
+const roadBehind = 40;
+const roadAhead = roadLength - roadBehind;
+const safeLateralLimit = roadWidth / 2 - 1.5;
 const roadRoot = new THREE.Group();
+const roadStrips = [];
 scene.add(roadRoot);
 
 function trackCenter(z) {
 	return Math.sin((z + 18) * 0.024) * 13 + Math.sin((z - 10) * 0.061) * 3.3;
 }
 
-function stripMesh(side, width, material, y) {
-	const positions = [];
+function stripMesh(side, innerOffset, width, material, y) {
+	const positions = new Float32Array((roadSegments + 1) * 2 * 3);
 	const indices = [];
 	for (let index = 0; index <= roadSegments; index += 1) {
-		const z = 45 - index * segmentLength;
-		const center = trackCenter(z);
-		const inner = side < 0 ? -roadWidth / 2 : roadWidth / 2;
-		const outer = inner + side * width;
-		positions.push(center + inner, y, z, center + outer, y, z);
+		const offset = roadBehind - index * segmentLength;
+		const center = trackCenter(offset);
+		const vertex = index * 6;
+		positions.set([
+			center + side * innerOffset, y, 5 + offset,
+			center + side * (innerOffset + width), y, 5 + offset,
+		], vertex);
 		if (index < roadSegments) {
 			const vertex = index * 2;
 			indices.push(vertex, vertex + 1, vertex + 2, vertex + 1, vertex + 3, vertex + 2);
@@ -98,34 +104,44 @@ function stripMesh(side, width, material, y) {
 	geometry.computeVertexNormals();
 	const mesh = new THREE.Mesh(geometry, material);
 	mesh.receiveShadow = true;
+	roadStrips.push({ geometry, side, innerOffset, width });
 	return mesh;
 }
 
-roadRoot.add(stripMesh(-1, roadWidth / 2, roadMaterial, 0));
-roadRoot.add(stripMesh(1, roadWidth / 2, roadMaterial, 0));
-roadRoot.add(stripMesh(-1, 2.5, shoulderMaterial, 0.005));
-roadRoot.add(stripMesh(1, 2.5, shoulderMaterial, 0.005));
+roadRoot.add(stripMesh(-1, 0, roadWidth / 2, roadMaterial, 0));
+roadRoot.add(stripMesh(1, 0, roadWidth / 2, roadMaterial, 0));
+roadRoot.add(stripMesh(-1, roadWidth / 2, 2.5, shoulderMaterial, 0.005));
+roadRoot.add(stripMesh(1, roadWidth / 2, 2.5, shoulderMaterial, 0.005));
 
 function createRoadMarkings() {
 	const group = new THREE.Group();
+	group.userData.movingFeatures = [];
 	const dashGeometry = new THREE.BoxGeometry(0.12, 0.035, 3.1);
-	for (let z = 36; z > -roadLength + 8; z -= 9) {
+	for (let z = 36; z > -roadLength + 45; z -= 9) {
 		const dash = new THREE.Mesh(dashGeometry, centerMaterial);
-		dash.position.set(trackCenter(z), 0.035, z);
+		dash.userData.trackZ = z - 5;
+		dash.userData.laneOffset = 0;
+		dash.position.set(trackCenter(dash.userData.trackZ), 0.035, z);
 		group.add(dash);
+		group.userData.movingFeatures.push(dash);
 	}
 	const edgeGeometry = new THREE.BoxGeometry(0.12, 0.04, 0.9);
-	for (let z = 42; z > -roadLength + 5; z -= 1.8) {
+	for (let z = 42; z > -roadLength + 45; z -= 1.8) {
 		const stripeMaterial = curbMaterials[Math.floor((42 - z) / 1.8) % 2];
 		for (const side of [-1, 1]) {
 			const curb = new THREE.Mesh(edgeGeometry, stripeMaterial);
-			curb.position.set(trackCenter(z) + side * (roadWidth / 2 - 0.08), 0.045, z);
+			curb.userData.trackZ = z - 5;
+			curb.userData.laneOffset = side * (roadWidth / 2 - 0.08);
+			curb.position.set(trackCenter(curb.userData.trackZ) + curb.userData.laneOffset, 0.045, z);
 			group.add(curb);
+			group.userData.movingFeatures.push(curb);
 		}
 	}
 	return group;
 }
-scene.add(createRoadMarkings());
+const roadMarkings = createRoadMarkings();
+scene.add(roadMarkings);
+const scenery = [];
 
 function makeTree(x, z, size) {
 	const group = new THREE.Group();
@@ -162,12 +178,19 @@ for (let z = 40; z > -roadLength; z -= 13) {
 			z,
 			2.3 + ((Math.sin(distance * 0.29) + 1) * 1.5),
 		);
+		tree.userData.trackZ = z - 5;
+		tree.userData.laneOffset = side * (roadWidth / 2 + 5 + Math.abs(jitter));
 		scene.add(tree);
+		scenery.push(tree);
 	}
 }
 
 const cars = [];
 const carColors = [0x79b7c8, 0xd8b967, 0xd67a65, 0x94a7d0, 0xe5e0d1];
+function trafficStartDistance(index, offset = 0) {
+	return 35 + index * 32 + offset;
+}
+
 function makeCar(color, isPlayer = false) {
 	const car = new THREE.Group();
 	const paint = new THREE.MeshStandardMaterial({
@@ -257,6 +280,8 @@ const state = {
 	throttle: 0.62,
 	paused: false,
 	manualUntil: 0,
+	avoidanceCar: null,
+	avoidanceTarget: null,
 	episode: 1,
 	collisions: 0,
 	best: Number(localStorage.getItem('apex-best-distance') || 0),
@@ -271,7 +296,7 @@ function spawnTraffic(index, offset = 0) {
 	const car = makeCar(carColors[index % carColors.length]);
 	car.userData.speed = 5.55 + (index % 4) * 0.22;
 	car.userData.lane = [-3.4, 0, 3.4][index % 3];
-	car.userData.distance = 26 + index * 19 + offset;
+	car.userData.distance = trafficStartDistance(index, offset);
 	car.userData.index = index;
 	car.position.set(trackCenter(-car.userData.distance) + car.userData.lane, 0, 5 - car.userData.distance * 1.1);
 	scene.add(car);
@@ -325,38 +350,71 @@ function smooth(current, target, rate, dt) {
 }
 
 function nearestCar() {
-	let nearest = Infinity;
-	let inLane = false;
+	let nearestGap = Infinity;
+	let nearestLaneGap = Infinity;
+	let nearestLane = null;
+	let nearestLaneSpeed = 0;
+	let nearestLaneCar = null;
 	for (const car of cars) {
 		const gap = car.userData.distance - state.distance;
-		if (gap > 0 && gap < nearest) {
-			nearest = gap;
-			inLane = Math.abs(car.userData.lane - state.lateral) < 2.2;
+		if (gap <= 0) continue;
+		nearestGap = Math.min(nearestGap, gap);
+		if (Math.abs(car.userData.lane - state.lateral) < 3 && gap < nearestLaneGap) {
+			nearestLaneGap = gap;
+			nearestLane = car.userData.lane;
+			nearestLaneSpeed = car.userData.speed;
+			nearestLaneCar = car;
 		}
 	}
-	return { gap: nearest, inLane };
+	return {
+		gap: nearestGap,
+		laneGap: nearestLaneGap,
+		lane: nearestLane,
+		laneSpeed: nearestLaneSpeed,
+		laneCar: nearestLaneCar,
+	};
 }
 
-function autonomousControl(gap, inLane, dt) {
+function autonomousControl(trafficAhead, dt) {
 	const curve = Math.sin((state.distance + 16) * 0.024) * 0.4;
-	const leftClearance = 6 - 1.1 + state.lateral;
-	const rightClearance = 6 - 1.1 - state.lateral;
 	let steeringTarget = THREE.MathUtils.clamp(-state.lateral * 0.1 - state.steering * 0.55 - curve, -0.6, 0.6);
-	if (gap < 18 && Math.abs(state.lateral - cars.find((car) => car.userData.distance - state.distance === gap)?.userData.lane) < 6) {
-		const obstacleLane = cars.reduce((closest, car) => {
-			const carGap = car.userData.distance - state.distance;
-			return carGap > 0 && carGap < closest.gap ? { gap: carGap, lane: car.userData.lane } : closest;
-		}, { gap: Infinity, lane: 0 }).lane;
-		const leftAvailable = obstacleLane < 0 && rightClearance > 2.5;
-		const rightAvailable = obstacleLane > 0 && leftClearance > 2.5;
-		if (leftAvailable) steeringTarget = -0.7;
-		else if (rightAvailable) steeringTarget = 0.7;
-		else if (rightClearance > leftClearance) steeringTarget = 0.7;
-		else steeringTarget = -0.7;
+	if (state.avoidanceCar && state.avoidanceCar.userData.distance - state.distance <= -6) {
+		state.avoidanceCar = null;
+		state.avoidanceTarget = null;
+	}
+	if (!state.avoidanceCar && trafficAhead.laneGap < 30) {
+		const candidates = [-3.4, 0, 3.4]
+			.filter((lane) => Math.abs(lane - trafficAhead.lane) > 2.6 && Math.abs(lane) <= safeLateralLimit - 0.5)
+			.map((lane) => {
+				const gap = cars.reduce((nearest, car) => {
+					const carGap = car.userData.distance - state.distance;
+					return car !== trafficAhead.laneCar
+						&& carGap > 0
+						&& Math.abs(car.userData.lane - lane) < 1.5
+						? Math.min(nearest, carGap)
+						: nearest;
+				}, Infinity);
+				return { lane, gap };
+			})
+			.filter((candidate) => candidate.gap > 30)
+			.sort((left, right) => right.gap - left.gap);
+		if (candidates.length) {
+			state.avoidanceCar = trafficAhead.laneCar;
+			state.avoidanceTarget = candidates[0].lane;
+		}
+	}
+	if (state.avoidanceCar) {
+		steeringTarget = THREE.MathUtils.clamp(
+			(state.avoidanceTarget - state.lateral) * 0.45 - state.steering * 0.5,
+			-0.8,
+			0.8,
+		);
 	}
 	state.targetSteering = steeringTarget;
 	const curveLimit = 22 - Math.min(7, Math.abs(curve) * 12);
-	const trafficLimit = inLane && gap < 18 ? Math.max(11.2, 5.55 + Math.max(0, gap - 5) * 0.6) : 32;
+	const trafficLimit = trafficAhead.laneGap < 30
+		? Math.max(11.2, trafficAhead.laneSpeed + Math.max(0, trafficAhead.laneGap - 6) * 0.25)
+		: 32;
 	state.safeSpeed = Math.max(11.2, Math.min(curveLimit, trafficLimit));
 	const throttleDemand = THREE.MathUtils.clamp((state.safeSpeed - state.speed) * 0.4, -1, 1);
 	state.throttle = smooth(state.throttle, throttleDemand, 2.2, dt);
@@ -377,21 +435,19 @@ function collidesWithTraffic(car, startDistance, startLateral, endDistance, endL
 function update(dt) {
 	const startDistance = state.distance;
 	const startLateral = state.lateral;
-	if (performance.now() > state.manualUntil) {
-		const trafficAhead = nearestCar();
-		autonomousControl(trafficAhead.gap, trafficAhead.inLane, dt);
+	if (performance.now() > state.manualUntil && manualSteeringInputs.size === 0) {
+		autonomousControl(nearestCar(), dt);
 	}
 	state.steering = smooth(state.steering, state.targetSteering, 2.2, dt);
 	state.steering = THREE.MathUtils.clamp(state.steering, -0.9, 0.9);
 	state.lateral += state.steering * dt * 4.1;
-	const roadLimit = roadWidth / 2 - 1.2;
-	state.lateral = THREE.MathUtils.clamp(state.lateral, -roadLimit, roadLimit);
+	state.lateral = THREE.MathUtils.clamp(state.lateral, -safeLateralLimit, safeLateralLimit);
 	state.speed = THREE.MathUtils.clamp(state.speed + state.throttle * 5.3 * dt, 11.2, 32);
 	state.distance += state.speed * dt;
 
 	let crash = false;
 	for (const car of cars) {
-		car.userData.distance += (state.speed - car.userData.speed) * dt;
+		car.userData.distance += car.userData.speed * dt;
 		const gap = car.userData.distance - state.distance;
 		car.position.x = trackCenter(-car.userData.distance) + car.userData.lane;
 		car.position.z = 5 - gap * 1.1;
@@ -405,6 +461,8 @@ function update(dt) {
 		state.speed = 11.2;
 		state.steering = 0;
 		state.targetSteering = 0;
+		state.avoidanceCar = null;
+		state.avoidanceTarget = null;
 		for (const car of cars) {
 			car.userData.distance += 90 + Math.random() * 35;
 		}
@@ -426,6 +484,7 @@ function update(dt) {
 		for (const wheel of car.userData.wheels) wheel.rotation.x += car.userData.speed * dt * 0.45;
 	}
 
+	updateTrackView();
 	const curve = trackCenter(-state.distance - 18) - trackCenter(-state.distance);
 	const cameraX = trackCenter(-state.distance) + state.lateral * 0.25 + curve * 0.15;
 	camera.position.x = smooth(camera.position.x, cameraX, 2.5, dt);
@@ -436,9 +495,52 @@ function update(dt) {
 
 	const nearest = nearestCar();
 	state.nearby = nearest.gap;
-	state.hazard = nearest.inLane && nearest.gap < 18;
+	state.hazard = nearest.laneGap < 18;
 	updateHud();
 	updateEngineSound();
+}
+
+function updateTrackView() {
+	for (const strip of roadStrips) {
+		const positions = strip.geometry.attributes.position;
+		for (let index = 0; index <= roadSegments; index += 1) {
+			const offset = roadBehind - index * segmentLength;
+			const center = trackCenter(-state.distance + offset);
+			const vertex = index * 2;
+			positions.setXYZ(vertex, center + strip.side * strip.innerOffset, positions.getY(vertex), 5 + offset);
+			positions.setXYZ(vertex + 1, center + strip.side * (strip.innerOffset + strip.width), positions.getY(vertex + 1), 5 + offset);
+		}
+		positions.needsUpdate = true;
+		strip.geometry.computeVertexNormals();
+	}
+
+	for (const feature of roadMarkings.userData.movingFeatures) {
+		let offset = feature.userData.trackZ + state.distance;
+		while (offset > roadBehind) {
+			feature.userData.trackZ -= roadLength;
+			offset -= roadLength;
+		}
+		while (offset < -roadAhead) {
+			feature.userData.trackZ += roadLength;
+			offset += roadLength;
+		}
+		feature.position.x = trackCenter(-state.distance + offset) + feature.userData.laneOffset;
+		feature.position.z = 5 + offset;
+	}
+
+	for (const tree of scenery) {
+		let offset = tree.userData.trackZ + state.distance;
+		while (offset > roadBehind) {
+			tree.userData.trackZ -= roadLength;
+			offset -= roadLength;
+		}
+		while (offset < -roadAhead) {
+			tree.userData.trackZ += roadLength;
+			offset += roadLength;
+		}
+		tree.position.x = trackCenter(-state.distance + offset) + tree.userData.laneOffset;
+		tree.position.z = 5 + offset;
+	}
 }
 
 function updateHud() {
@@ -454,7 +556,7 @@ function updateHud() {
 	ui.radar.textContent = Number.isFinite(state.nearby) ? state.nearby.toFixed(1) : '—';
 	ui.radarState.textContent = state.hazard ? 'BRAKING' : 'CLEAR';
 	ui.radarState.style.color = state.hazard ? 'var(--coral)' : 'var(--lime)';
-	const clearance = Math.max(0, Math.min(1, (roadWidth / 2 - 1.1 - Math.abs(state.lateral)) / (roadWidth / 2 - 1.1)));
+	const clearance = Math.max(0, Math.min(1, (safeLateralLimit - Math.abs(state.lateral)) / safeLateralLimit));
 	ui.clearance.textContent = `${Math.round(clearance * 100)}%`;
 	ui.clearanceFill.style.width = `${clearance * 100}%`;
 	ui.steer.textContent = `${state.steering >= 0 ? '+' : '−'}${String(Math.round(Math.abs(state.steering) * 30)).padStart(2, '0')}°`;
@@ -462,7 +564,7 @@ function updateHud() {
 	ui.best.textContent = state.best ? state.best.toFixed(0) : '—';
 	ui.collisions.textContent = String(state.collisions).padStart(2, '0');
 	const throttlePercent = Math.round(THREE.MathUtils.clamp((state.throttle + 0.25) / 1.3, 0, 1) * 100);
-	ui.throttleValue.textContent = `${Math.round(state.throttle * 100)}%`;
+	ui.throttleValue.textContent = `${throttlePercent}%`;
 	ui.throttle.value = String(throttlePercent);
 	ui.throttle.style.background = `linear-gradient(90deg, #c7e27b ${throttlePercent}%, #354239 ${throttlePercent}%)`;
 }
@@ -479,25 +581,42 @@ function render(now) {
 
 function applyManualSteer(direction) {
 	state.manualUntil = performance.now() + 800;
-	state.targetSteering = direction;
+	state.targetSteering = manualSteeringInputs.size
+		? [...manualSteeringInputs.values()].at(-1)
+		: direction;
 }
-function bindHold(button, direction) {
+const manualSteeringInputs = new Map();
+function setManualSteerInput(source, direction) {
+	if (direction === 0) manualSteeringInputs.delete(source);
+	else manualSteeringInputs.set(source, direction);
+	applyManualSteer(0);
+}
+function bindHold(button, direction, source) {
 	button.addEventListener('pointerdown', (event) => {
 		event.preventDefault();
 		button.setPointerCapture(event.pointerId);
-		applyManualSteer(direction);
+		setManualSteerInput(source, direction);
 	});
-	button.addEventListener('pointerup', () => applyManualSteer(0));
-	button.addEventListener('pointercancel', () => applyManualSteer(0));
-	button.addEventListener('lostpointercapture', () => applyManualSteer(0));
+	button.addEventListener('pointerup', () => setManualSteerInput(source, 0));
+	button.addEventListener('pointercancel', () => setManualSteerInput(source, 0));
+	button.addEventListener('lostpointercapture', () => setManualSteerInput(source, 0));
 }
-bindHold(document.querySelector('#steer-left'), -0.8);
-bindHold(document.querySelector('#steer-right'), 0.8);
+bindHold(document.querySelector('#steer-left'), -0.8, 'button-left');
+bindHold(document.querySelector('#steer-right'), 0.8, 'button-right');
 
 document.addEventListener('keydown', (event) => {
-	if (event.repeat || event.target instanceof HTMLInputElement) return;
-	if (event.key.toLowerCase() === 'a' || event.key === 'ArrowLeft') applyManualSteer(-0.8);
-	if (event.key.toLowerCase() === 'd' || event.key === 'ArrowRight') applyManualSteer(0.8);
+	if (event.target instanceof HTMLInputElement) return;
+	if (event.key.toLowerCase() === 'a' || event.key === 'ArrowLeft') {
+		event.preventDefault();
+		setManualSteerInput('keyboard-left', -0.8);
+		return;
+	}
+	if (event.key.toLowerCase() === 'd' || event.key === 'ArrowRight') {
+		event.preventDefault();
+		setManualSteerInput('keyboard-right', 0.8);
+		return;
+	}
+	if (event.repeat) return;
 	if (event.key.toLowerCase() === 'w' || event.key === 'ArrowUp') {
 		state.manualUntil = performance.now() + 800;
 		state.throttle = Math.min(1, state.throttle + 0.18);
@@ -514,7 +633,12 @@ document.addEventListener('keydown', (event) => {
 	}
 });
 document.addEventListener('keyup', (event) => {
-	if (['a', 'd', 'ArrowLeft', 'ArrowRight'].includes(event.key)) applyManualSteer(0);
+	if (event.key.toLowerCase() === 'a' || event.key === 'ArrowLeft') setManualSteerInput('keyboard-left', 0);
+	if (event.key.toLowerCase() === 'd' || event.key === 'ArrowRight') setManualSteerInput('keyboard-right', 0);
+});
+window.addEventListener('blur', () => {
+	manualSteeringInputs.clear();
+	applyManualSteer(0);
 });
 ui.throttle.addEventListener('input', () => {
 	state.manualUntil = performance.now() + 1200;
@@ -543,11 +667,13 @@ function resetRun() {
 	state.speed = 20;
 	state.steering = 0;
 	state.targetSteering = 0;
+	state.avoidanceCar = null;
+	state.avoidanceTarget = null;
 	state.throttle = 0.62;
 	state.episode += 1;
 	state.manualUntil = 0;
 	for (const car of cars) {
-		car.userData.distance = 26 + car.userData.index * 19 + Math.random() * 14;
+		car.userData.distance = trafficStartDistance(car.userData.index, Math.random() * 14);
 		car.userData.lane = [-3.4, 0, 3.4][Math.floor(Math.random() * 3)];
 	}
 	ui.throttle.value = 62;
