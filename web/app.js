@@ -1198,8 +1198,8 @@ function updateHud() {
 	const throttlePercent = Math.round(THREE.MathUtils.clamp((state.throttle + 0.25) / 1.3, 0, 1) * 100);
 	ui.throttleValue.textContent = `${throttlePercent}%`;
 	ui.throttle.value = String(throttlePercent);
-	const throttleFill = state.dayMode ? '#138e9d' : '#c7e27b';
-	const throttleTrack = state.dayMode ? '#d6dfe8' : '#354239';
+	const throttleFill = state.dayMode ? '#138e9d' : '#b779ed';
+	const throttleTrack = state.dayMode ? '#d6dfe8' : '#30263f';
 	ui.throttle.style.background = `linear-gradient(90deg, ${throttleFill} ${throttlePercent}%, ${throttleTrack} ${throttlePercent}%)`;
 }
 
