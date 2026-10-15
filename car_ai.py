@@ -49,6 +49,17 @@ def _load_policy_state(
 	return True
 
 
+def _shared_checkpoint_version(path: Path) -> int:
+	"""Extract the numeric version from a versioned shared checkpoint filename."""
+	if not path.name.startswith("car_ai_shared_checkpoint_v"):
+		return -1
+	version = path.stem.rsplit("_v", 1)[-1]
+	try:
+		return int(version)
+	except ValueError:
+		return -1
+
+
 @dataclass
 class EpisodeRollout:
 	"""Compact CPU storage for one completed episode's training experience."""
@@ -271,7 +282,24 @@ class OnlineDriver:
 				checkpoint_candidates.append(candidate)
 		if not checkpoint_candidates:
 			return False
-		source = max(checkpoint_candidates, key=lambda path: path.stat().st_mtime_ns)
+
+		# Prefer the newest shared checkpoint when it exists, instead of the more
+		# recently modified GUI checkpoint. This keeps OnlineDriver aligned with the
+		# headless training policy during mixed-mode runs.
+		shared_candidates = [
+			path for path in checkpoint_candidates if "shared" in path.name
+		]
+		if shared_candidates:
+			shared_candidates.sort(
+				key=lambda path: (
+					_shared_checkpoint_version(path),
+					path.stat().st_mtime_ns,
+				),
+				reverse=True,
+			)
+			source = shared_candidates[0]
+		else:
+			source = max(checkpoint_candidates, key=lambda path: path.stat().st_mtime_ns)
 		checkpoint = torch.load(
 			source,
 			map_location=self.device,
