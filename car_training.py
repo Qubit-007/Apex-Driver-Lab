@@ -72,6 +72,7 @@ def train_headless(
 	traffic_speed_kmh: float = 20.0,
 	ai_min_speed_kmh: float = 40.0,
 	curriculum: bool = False,
+	batch_by_episodes_only: bool = False,
 ) -> SharedPolicyTrainer:
 	"""Run concurrent simulations and update the shared policy on each finish."""
 	if environments <= 0:
@@ -98,15 +99,11 @@ def train_headless(
 	checkpoint = (
 		Path(checkpoint_path)
 		if checkpoint_path is not None
-<<<<<<< HEAD
 		else _default_checkpoint_path(
 			async_reset=async_reset,
 			obs_v2=obs_v2,
 			hidden_sizes=hidden_sizes,
 		)
-=======
-		else Path(__file__).with_name("car_ai_shared_checkpoint_v2.pt")
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 	)
 	trainer = SharedPolicyTrainer(
 		(
@@ -121,9 +118,9 @@ def train_headless(
 		sensible_init=obs_v2 or hidden_sizes != (256, 256),
 	)
 	if trainer.device.type == "cuda":
-		print(f"Training device: {torch.cuda.get_device_name(trainer.device)}")
+		print(f"Training device: {torch.cuda.get_device_name(trainer.device)}", flush=True)
 	else:
-		print(f"Training device: {trainer.device}")
+		print(f"Training device: {trainer.device}", flush=True)
 
 	simulations = []
 	for index in range(environments):
@@ -159,11 +156,10 @@ def train_headless(
 			transitions_per_update=async_transitions,
 			max_policy_lag=max_policy_lag,
 			min_batch_episodes=min_batch_episodes,
-			report_every=report_every,
 			curriculum=curriculum,
+			batch_by_episodes_only=batch_by_episodes_only,
 		)
 
-<<<<<<< HEAD
 	observation_size = (
 		DrivingSimulation.OBSERVATION_V2_SIZE
 		if obs_v2
@@ -174,43 +170,27 @@ def train_headless(
 		for _ in simulations
 	]
 	starting_update = trainer.updates_completed
-	target_update = starting_update + updates
+	target_update = (
+		starting_update + updates
+		if updates is not None
+		else None
+	)
 	report_count = 0
 	report_distance = 0.0
 	report_loss = 0.0
 	report_reasons: dict[str, int] = {}
 	recent_distances: deque[float] = deque(maxlen=100)
-=======
-	local_update = 1
-	while updates is None or local_update <= updates:
-		rollouts = [
-			EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
-			for _ in simulations
-		]
-		active = list(range(environments))
-		while active:
-			observations = [simulations[index].observe() for index in active]
-			actions = trainer.sample_actions(observations)
-			next_active = []
-			for index, observation, (action, log_probability) in zip(
-				active, observations, actions
-			):
-				result = simulations[index].step(action, dt=1.0 / 30.0)
-				rollouts[index].append(
-					observation, action, result.reward, log_probability
-				)
-				if not result.done:
-					next_active.append(index)
-			active = next_active
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
-	while trainer.updates_completed < target_update:
+	while target_update is None or trainer.updates_completed < target_update:
 		observations = [simulation.observe() for simulation in simulations]
 		actions = trainer.sample_actions(observations)
 		for index, observation, (action, log_probability) in zip(
 			range(environments), observations, actions
 		):
-			if trainer.updates_completed >= target_update:
+			if (
+				target_update is not None
+				and trainer.updates_completed >= target_update
+			):
 				break
 			simulation = simulations[index]
 			result = simulation.step(action, dt=1.0 / 30.0)
@@ -240,7 +220,10 @@ def train_headless(
 			simulation.reset()
 			rollouts[index] = EpisodeRollout(observation_size)
 
-			if report_count >= report_every or trainer.updates_completed >= target_update:
+			if report_count >= report_every or (
+				target_update is not None
+				and trainer.updates_completed >= target_update
+			):
 				reason_summary = ", ".join(
 					f"{name}: {count}"
 					for name, count in sorted(report_reasons.items())
@@ -248,7 +231,8 @@ def train_headless(
 				print(
 					f"Completed {trainer.episodes_trained} episodes | "
 					f"updates {trainer.updates_completed}/"
-					f"{target_update} batch-equivalents | "
+					f"{target_update if target_update is not None else 'until stopped'} "
+					"batch-equivalents | "
 					f"last {report_count} mean distance "
 					f"{report_distance / report_count:.1f} m | "
 					f"mean loss {report_loss / report_count:.4f} | "
@@ -323,15 +307,15 @@ def _filter_stale_episodes(
 def _train_auto_reset(
 	trainer: SharedPolicyTrainer,
 	simulations: list[DrivingSimulation],
-	updates: int,
+	updates: int | None,
 	minibatch_size: int,
 	optimization_epochs: int,
 	episodes_per_update: int,
 	transitions_per_update: int,
 	max_policy_lag: int,
 	min_batch_episodes: int,
-	report_every: int,
 	curriculum: bool,
+	batch_by_episodes_only: bool,
 ) -> SharedPolicyTrainer:
 	"""Collect complete episodes continuously and update only at batch thresholds."""
 	observation_size = (
@@ -353,19 +337,27 @@ def _train_auto_reset(
 	finished_transitions = 0
 	stale_dropped_since_update = 0
 	starting_update = trainer.updates_completed
-	target_update = starting_update + updates
+	target_update = (
+		starting_update + updates
+		if updates is not None
+		else None
+	)
 	window_started = time.perf_counter()
 	window_transitions = 0
 	window_slot_samples = 0
 	window_ticks = 0
 	recent_distances: deque[float] = deque(maxlen=100)
+	next_environment_index = 0
 
-	while trainer.updates_completed < target_update:
+	while target_update is None or trainer.updates_completed < target_update:
 		# Every slot samples from the same immutable policy version for this tick.
 		collection_version = trainer.updates_completed
 		actions = trainer.sample_actions(current_observations)
-		completed_this_tick = 0
-		for index, (action, log_probability) in enumerate(actions):
+		first_environment_index = next_environment_index
+		next_environment_index = (first_environment_index + 1) % environments
+		for offset in range(environments):
+			index = (first_environment_index + offset) % environments
+			action, log_probability = actions[index]
 			simulation = simulations[index]
 			episode = current_episodes[index]
 			result = simulation.step(action, dt=1.0 / 30.0)
@@ -394,7 +386,6 @@ def _train_auto_reset(
 			)
 			finished.append(finished_episode)
 			finished_transitions += finished_episode.transitions
-			completed_this_tick += 1
 			recent_distances.append(simulation.player.distance)
 			if curriculum:
 				mean_distance = sum(recent_distances) / len(recent_distances)
@@ -408,11 +399,21 @@ def _train_auto_reset(
 				EpisodeRollout(observation_size)
 			)
 
+			episode_threshold_reached = len(finished) >= episodes_per_update
+			transition_threshold_reached = (
+				finished_transitions >= transitions_per_update
+			)
+			batch_threshold_reached = (
+				episode_threshold_reached
+				if batch_by_episodes_only
+				else episode_threshold_reached or transition_threshold_reached
+			)
+			if batch_threshold_reached and len(finished) >= min_batch_episodes:
+				next_environment_index = (index + 1) % environments
+				break
+
 		window_ticks += 1
-		if not finished or not (
-			len(finished) >= episodes_per_update
-			or finished_transitions >= transitions_per_update
-		):
+		if not finished:
 			continue
 
 		# Versions are recorded per action, but stale episodes are dropped whole
@@ -440,7 +441,6 @@ def _train_auto_reset(
 			minibatch_size=minibatch_size,
 			optimization_epochs=optimization_epochs,
 		)
-<<<<<<< HEAD
 		# The trainer owns one live policy shared by every environment, so the
 		# next vector tick automatically uses its new weights and update version.
 		policy_version = trainer.updates_completed
@@ -478,7 +478,8 @@ def _train_auto_reset(
 		)
 		ppo_metrics = trainer.last_ppo_metrics
 		print(
-			f"Update {trainer.updates_completed}/{target_update} | "
+			f"Completed batch {trainer.updates_completed - starting_update}/"
+			f"{updates if updates is not None else 'until stopped'} | "
 			f"{window_transitions} steps @ {steps_per_second:.0f} steps/s | "
 			f"envs active {active_percent:.1f}% | "
 			f"episodes used {len(kept_episodes)} | "
@@ -490,8 +491,12 @@ def _train_auto_reset(
 			f"end reasons [{reason_summary}] | "
 			f"PPO clip fraction {ppo_metrics['clip_fraction']:.3f} | "
 			f"approx KL {ppo_metrics['approx_kl']:.5f} | "
-			f"loss {loss:.4f}"
+			f"loss {loss:.4f}",
+			flush=True,
 		)
+		checkpoint_saved = getattr(trainer, "latest_checkpoint_path", None)
+		if checkpoint_saved is not None:
+			print(f"Checkpoint saved: {checkpoint_saved}", flush=True)
 		finished = []
 		finished_transitions = 0
 		stale_dropped_since_update = 0
@@ -499,34 +504,5 @@ def _train_auto_reset(
 		window_transitions = 0
 		window_slot_samples = 0
 		window_ticks = 0
-=======
-		if (
-			local_update % report_every == 0
-			or (updates is not None and local_update == updates)
-		):
-			mean_distance = sum(
-				simulation.player.distance for simulation in simulations
-			) / environments
-			reason_counts: dict[str, int] = {}
-			for simulation in simulations:
-				reason = simulation.crash_reason or "unknown"
-				reason_counts[reason] = reason_counts.get(reason, 0) + 1
-			reason_summary = ", ".join(
-				f"{reason}: {count}" for reason, count in sorted(reason_counts.items())
-			)
-			learning_rate = trainer.optimizer.param_groups[0]["lr"]
-			print(
-				f"Update {trainer.updates_completed} "
-				f"({local_update}/{updates or 'until stopped'}) | "
-				f"{environments} episodes | "
-				f"mean distance {mean_distance:.1f} m | "
-				f"loss {loss:.4f} | lr {learning_rate:.2e} | "
-				f"{reason_summary}"
-			)
-
-		for simulation in simulations:
-			simulation.reset()
-		local_update += 1
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 	return trainer

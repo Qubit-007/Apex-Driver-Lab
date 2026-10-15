@@ -526,9 +526,14 @@ def main() -> None:
 	parser = argparse.ArgumentParser(description="Procedural driving AI")
 	parser.add_argument(
 		"--mode",
-		choices=("gui", "headless"),
+		choices=("gui", "headless", "3d"),
 		default="gui",
 		help="show the game or train shared simulations without a window",
+	)
+	parser.add_argument(
+		"--terminal",
+		action="store_true",
+		help="run 3D mode as terminal-only training without opening a window",
 	)
 	parser.add_argument(
 		"--device",
@@ -536,8 +541,14 @@ def main() -> None:
 		default=None,
 		help="training device (headless defaults to CUDA; GUI auto-selects)",
 	)
-	parser.add_argument("--environments", type=int, default=1000)
-	parser.add_argument("--updates", type=int, default=1000)
+	parser.add_argument("--environments", type=int)
+	parser.add_argument("--updates", type=int)
+	parser.add_argument(
+		"--batch-episodes",
+		type=int,
+		default=20,
+		help="completed episodes per training batch in 3D terminal mode (default: 20)",
+	)
 	parser.add_argument(
 		"--until-stopped",
 		action="store_true",
@@ -618,6 +629,13 @@ def main() -> None:
 	)
 	args = parser.parse_args()
 
+	if args.mode == "3d" and not args.terminal:
+		parser.error("--mode 3d requires --terminal")
+	if args.terminal and args.mode != "3d":
+		parser.error("--terminal can only be used with --mode 3d")
+	if args.mode == "3d" and args.batch_episodes <= 0:
+		parser.error("--batch-episodes must be positive")
+
 	if args.mode == "gui":
 		if (
 			args.obs_v2
@@ -640,46 +658,57 @@ def main() -> None:
 	else:
 		from car_training import train_headless
 
-<<<<<<< HEAD
-		train_headless(
-			environments=args.environments,
-			updates=args.updates,
-			device=args.device or "cuda",
-			minibatch_size=args.minibatch_size,
-			optimization_epochs=args.optimization_epochs,
-			learning_rate_decay=args.learning_rate_decay,
-			checkpoint_path=args.checkpoint,
-			seed=args.seed,
-			report_every=args.report_every,
-			async_reset=args.async_reset,
-			async_episodes=args.async_episodes,
-			async_transitions=args.async_transitions,
-			max_policy_lag=args.max_policy_lag,
-			min_batch_episodes=args.min_batch_episodes,
-			max_episode_steps=args.max_episode_steps,
-			obs_v2=args.obs_v2,
-			hidden_sizes=args.hidden,
-			traffic_density=args.traffic_density,
-			traffic_speed_kmh=args.traffic_speed,
-			ai_min_speed_kmh=args.ai_min_speed,
-			curriculum=args.curriculum,
-		)
-=======
+		environments = args.environments
+		if environments is None:
+			environments = 32 if args.mode == "3d" else 1000
+		updates = args.updates
+		if updates is None and not args.until_stopped:
+			updates = 100 if args.mode == "3d" else 1000
+		checkpoint_path = args.checkpoint
+		if args.mode == "3d" and checkpoint_path is None:
+			checkpoint_path = Path(__file__).with_name(
+				"3D_world_checkpoint_v1.pt"
+			)
+		if args.mode == "3d":
+			print(
+				f"3D terminal training: {updates or 'until stopped'} batches, "
+				f"{args.batch_episodes} completed episodes per batch; "
+				f"checkpoint family {checkpoint_path}",
+				flush=True,
+			)
 		try:
 			train_headless(
-				environments=args.environments,
-				updates=None if args.until_stopped else args.updates,
+				environments=environments,
+				updates=None if args.until_stopped else updates,
 				device=args.device or "cuda",
 				minibatch_size=args.minibatch_size,
 				optimization_epochs=args.optimization_epochs,
 				learning_rate_decay=args.learning_rate_decay,
-				checkpoint_path=args.checkpoint,
+				checkpoint_path=checkpoint_path,
 				seed=args.seed,
 				report_every=args.report_every,
+				async_reset=args.async_reset or args.mode == "3d",
+				async_episodes=(
+					args.batch_episodes if args.mode == "3d"
+					else args.async_episodes
+				),
+				async_transitions=args.async_transitions,
+				max_policy_lag=args.max_policy_lag,
+				min_batch_episodes=(
+					args.batch_episodes if args.mode == "3d"
+					else args.min_batch_episodes
+				),
+				max_episode_steps=args.max_episode_steps,
+				obs_v2=args.obs_v2,
+				hidden_sizes=args.hidden,
+				traffic_density=args.traffic_density,
+				traffic_speed_kmh=args.traffic_speed,
+				ai_min_speed_kmh=args.ai_min_speed,
+				curriculum=args.curriculum,
+				batch_by_episodes_only=args.mode == "3d",
 			)
 		except KeyboardInterrupt:
 			print("Training stopped by user. Latest completed update is checkpointed.")
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 
 if __name__ == "__main__":

@@ -146,6 +146,7 @@ class OnlineDriver:
 			weight_decay=1e-4,
 		)
 		self.checkpoint_path = Path(checkpoint_path)
+		self.latest_checkpoint_path: Path | None = None
 		self.gamma = gamma
 		self._log_probabilities: List[Tensor] = []
 		self._rewards: List[float] = []
@@ -339,11 +340,8 @@ class SharedPolicyTrainer:
 	"""Train one shared policy immediately from completed parallel episodes."""
 
 	CHECKPOINT_VERSION = 2
-<<<<<<< HEAD
 	PPO_CLIP_RANGE = 0.2
 	ENTROPY_COEFFICIENT = 0.01
-=======
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 	def __init__(
 		self,
@@ -582,7 +580,7 @@ class SharedPolicyTrainer:
 		}
 		return loss_total / minibatch_count
 
-	def save_checkpoint(self) -> None:
+	def save_checkpoint(self) -> Path:
 		"""Persist training state as a generation to avoid replacing locked files."""
 		self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 		payload = {
@@ -633,6 +631,8 @@ class SharedPolicyTrainer:
 					RuntimeWarning,
 					stacklevel=2,
 				)
+		self.latest_checkpoint_path = generation_path
+		return generation_path
 
 	def _checkpoint_generations(
 		self,

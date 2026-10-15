@@ -91,7 +91,7 @@ class DrivingSimulation:
 	OBSERVATION_V2_MAX_DISTANCE = 150.0
 	OBSERVATION_V2_PROXIMITY_DECAY = 75.0
 	OBSERVATION_V2_MAX_TTC = 10.0
-	MAX_EPISODE_STEPS = 1800
+	MAX_EPISODE_STEPS: int = 1800
 
 	def __init__(
 		self,
@@ -276,7 +276,6 @@ class DrivingSimulation:
 
 		return tuple(features)
 
-<<<<<<< HEAD
 	def _road_heading(self, distance: float) -> float:
 		"""Estimate centerline heading relative to the track-forward axis."""
 		before_distance = max(0.0, distance - 1.0)
@@ -417,7 +416,6 @@ class DrivingSimulation:
 			raise ValueError("mean_distance must be finite and non-negative")
 		self.mean_training_distance = mean_distance
 
-=======
 	def _safe_speed_limit(self) -> float:
 		"""Return a soft speed target that decreases for tighter upcoming curves."""
 		start = self.track.center_x_at(self.player.distance)
@@ -433,7 +431,6 @@ class DrivingSimulation:
 			self.PLAYER_CRUISE_SPEED - curve_reduction,
 		)
 
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 	def _update_traffic(self, dt: float) -> None:
 		for car in self.traffic:
 			car.distance += car.speed * dt
@@ -443,9 +440,9 @@ class DrivingSimulation:
 		]
 		lanes = (-3.2, 0.0, 3.2)
 		while len(self.traffic) < self.traffic_count:
-			furthest_distance = max(
-				(self.player.distance + 80.0, *(car.distance for car in self.traffic))
-			)
+			furthest_distance = self.player.distance + 80.0
+			for car in self.traffic:
+				furthest_distance = max(furthest_distance, car.distance)
 			self.traffic.append(
 				self._make_traffic_car(
 					furthest_distance + self._rng.uniform(20.0, 38.0),
@@ -488,7 +485,7 @@ class DrivingSimulation:
 				candidate_scores[direction] = min(edge_clearance, traffic_clearance)
 			requested_steering = max(
 				candidate_scores,
-				key=candidate_scores.get,
+				key=lambda direction: candidate_scores[direction],
 			)
 
 		max_lateral = (

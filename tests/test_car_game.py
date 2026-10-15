@@ -33,6 +33,60 @@ class CommandLineTests(unittest.TestCase):
 
 		self.assertIsNone(train.call_args.kwargs["updates"])
 
+	def test_3d_terminal_mode_uses_its_versioned_checkpoint(self) -> None:
+		with (
+			patch(
+				"sys.argv",
+				[
+					"car.py",
+					"--mode",
+					"3d",
+					"--terminal",
+					"--device",
+					"cpu",
+					"--environments",
+					"2",
+					"--updates",
+					"3",
+				],
+			),
+			patch("car_training.train_headless") as train,
+		):
+			main()
+
+		self.assertEqual(
+			train.call_args.kwargs["checkpoint_path"],
+			PROJECT_ROOT / "3D_world_checkpoint_v1.pt",
+		)
+		self.assertEqual(train.call_args.kwargs["environments"], 2)
+		self.assertEqual(train.call_args.kwargs["updates"], 3)
+		self.assertEqual(train.call_args.kwargs["device"], "cpu")
+		self.assertTrue(train.call_args.kwargs["async_reset"])
+		self.assertEqual(train.call_args.kwargs["async_episodes"], 20)
+		self.assertEqual(train.call_args.kwargs["min_batch_episodes"], 20)
+		self.assertTrue(train.call_args.kwargs["batch_by_episodes_only"])
+
+	def test_3d_terminal_mode_defaults_to_one_hundred_twenty_episode_batches(self) -> None:
+		with (
+			patch("sys.argv", ["car.py", "--mode", "3d", "--terminal"]),
+			patch("car_training.train_headless") as train,
+			patch("builtins.print"),
+		):
+			main()
+
+		self.assertEqual(train.call_args.kwargs["updates"], 100)
+		self.assertEqual(train.call_args.kwargs["environments"], 32)
+		self.assertEqual(train.call_args.kwargs["async_episodes"], 20)
+		self.assertEqual(train.call_args.kwargs["min_batch_episodes"], 20)
+		self.assertTrue(train.call_args.kwargs["batch_by_episodes_only"])
+
+	def test_3d_mode_requires_terminal_flag(self) -> None:
+		with (
+			patch("sys.argv", ["car.py", "--mode", "3d"]),
+			self.assertRaises(SystemExit),
+		):
+			main()
+
 
 class DrivingSimulationTests(unittest.TestCase):
 	def test_observation_has_fixed_normalized_shape_and_traffic_count(self) -> None:
@@ -611,7 +665,6 @@ class OnlineDriverTests(unittest.TestCase):
 
 
 class SharedPolicyTrainerTests(unittest.TestCase):
-<<<<<<< HEAD
 	def test_policy_supports_configurable_hidden_sizes(self) -> None:
 		from car_ai import DrivingPolicy
 
@@ -623,7 +676,7 @@ class SharedPolicyTrainerTests(unittest.TestCase):
 			policy(torch.zeros(26)).shape,
 			(9,),
 		)
-=======
+
 	def test_shared_trainer_migrates_legacy_checkpoint_inputs(self) -> None:
 		with tempfile.TemporaryDirectory() as directory:
 			legacy_policy = DrivingPolicy(DrivingSimulation.OBSERVATION_SIZE - 2)
@@ -662,7 +715,6 @@ class SharedPolicyTrainerTests(unittest.TestCase):
 			self.assertTrue(torch.equal(migrated_weight[:, :3], legacy_weight[:, :3]))
 			self.assertTrue(torch.equal(migrated_weight[:, 5:], legacy_weight[:, 3:]))
 			self.assertEqual(torch.count_nonzero(migrated_weight[:, 3:5]).item(), 0)
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 	def test_batched_update_decays_schedule_and_restores_checkpoint(self) -> None:
 		with tempfile.TemporaryDirectory() as directory:
@@ -1005,7 +1057,10 @@ class HeadlessTrainingTests(unittest.TestCase):
 		logs = []
 		with patch("car_training.DrivingSimulation", FakeSimulation), patch(
 			"car_training.SharedPolicyTrainer", FakeTrainer
-		), patch("builtins.print", side_effect=logs.append):
+		), patch(
+			"builtins.print",
+			side_effect=lambda *args, **_kwargs: logs.append(" ".join(map(str, args))),
+		):
 			trainer = train_headless(
 				environments=2,
 				updates=2,
@@ -1019,16 +1074,16 @@ class HeadlessTrainingTests(unittest.TestCase):
 			)
 
 		self.assertEqual(trainer.updates_completed, 2)
-		self.assertEqual(trainer.episodes_trained, 8)
+		self.assertEqual(trainer.episodes_trained, 6)
 		self.assertEqual(len(trainer.batches), 2)
-		self.assertTrue(all(len(batch) >= 3 for batch in trainer.batches))
+		self.assertEqual([len(batch) for batch in trainer.batches], [3, 3])
 		self.assertEqual(
-			[len(episode) for episode in trainer.batches[0]],
-			[1, 1, 1, 3],
+			sorted(len(episode) for episode in trainer.batches[0]),
+			[1, 1, 1],
 		)
 		self.assertEqual(
-			[len(episode) for episode in trainer.batches[1]],
-			[1, 1, 1, 3],
+			sorted(len(episode) for episode in trainer.batches[1]),
+			[1, 1, 3],
 		)
 		self.assertTrue(
 			all(
@@ -1036,35 +1091,41 @@ class HeadlessTrainingTests(unittest.TestCase):
 				for episode in trainer.batches[0]
 			)
 		)
-		self.assertTrue(
-			all(
-				all(value == 1.0 for value in episode.log_probabilities)
-				for episode in trainer.batches[1]
-			)
+		self.assertEqual(
+			[episode.log_probabilities.tolist() for episode in trainer.batches[1]],
+			[[0.0, 0.0, 1.0], [1.0], [1.0]],
 		)
 		self.assertEqual(
 			[simulation.MAX_EPISODE_STEPS for simulation in simulations],
 			[7, 7],
 		)
-		self.assertEqual([simulation.episodes_completed for simulation in simulations], [6, 2])
+		self.assertEqual(
+			sum(simulation.episodes_completed for simulation in simulations),
+			6,
+		)
 		self.assertIn(("step", 1, 2), events)
 		self.assertLess(
 			events.index(("reset", 0, 1)),
 			events.index(("step", 1, 2)),
 		)
-		self.assertEqual(trainer.sampled_versions, [0, 0, 0, 1, 1, 1])
-		update_logs = [log for log in logs if log.startswith("Update ")]
+		self.assertEqual(trainer.sampled_versions[:3], [0, 0, 0])
+		self.assertTrue(
+			len(trainer.sampled_versions) >= 5
+			and all(version == 1 for version in trainer.sampled_versions[3:])
+		)
+		update_logs = [log for log in logs if log.startswith("Completed batch ")]
 		self.assertEqual(len(update_logs), 2)
 		self.assertTrue(
 			all(
-				"episodes used 4" in log
-				and "distance mean/median 1.5/1.0 m" in log
-				and "end reasons [episode limit=4]" in log
+				"episodes used 3" in log
+				and "end reasons [episode limit=3]" in log
 				and "PPO clip fraction 0.125" in log
 				and "approx KL 0.03125" in log
 				for log in update_logs
 			)
 		)
+		self.assertIn("distance mean/median 1.0/1.0 m", update_logs[0])
+		self.assertIn("distance mean/median 1.7/1.0 m", update_logs[1])
 
 		rollout = EpisodeRollout(1)
 		rollout.append((0.0,), 4, 1.0, -0.5)
@@ -1090,6 +1151,93 @@ class HeadlessTrainingTests(unittest.TestCase):
 		)
 		self.assertEqual(kept, [fresh])
 		self.assertEqual(stale_count, 1)
+
+	def test_episode_batch_stops_at_threshold_and_reports_saved_checkpoint(self) -> None:
+		from car_training import train_headless
+
+		simulations = []
+
+		class FakeSimulation:
+			OBSERVATION_SIZE = 1
+			MAX_EPISODE_STEPS = 1800
+
+			def __init__(self, **_kwargs) -> None:
+				self.index = len(simulations)
+				self.player = types.SimpleNamespace(distance=0.0)
+				simulations.append(self)
+
+			def observe(self):
+				return (float(self.index),)
+
+			def step(self, _action: int, dt: float):
+				self.player.distance += 1.0
+				return types.SimpleNamespace(
+					reward=1.0,
+					done=True,
+					crash_reason="test crash",
+					observation=(float(self.index),),
+				)
+
+			def reset(self):
+				self.player.distance = 0.0
+				return self.observe()
+
+		class FakeTrainer:
+			gamma = 0.99
+
+			def __init__(self, *_args, **_kwargs) -> None:
+				self.device = torch.device("cpu")
+				self.updates_completed = 0
+				self.episodes_trained = 0
+				self.optimizer = types.SimpleNamespace(
+					param_groups=[{"lr": 3e-4}]
+				)
+				self.last_ppo_metrics = {"clip_fraction": 0.0, "approx_kl": 0.0}
+				self.latest_checkpoint_path = None
+				self.batch_sizes = []
+
+			def sample_actions(self, observations):
+				return [(4, 0.0) for _ in observations]
+
+			def train_batch(self, episodes, **_kwargs):
+				self.batch_sizes.append(len(episodes))
+				self.episodes_trained += len(episodes)
+				self.updates_completed += 1
+				self.latest_checkpoint_path = Path(
+					f"3D_world_checkpoint_v1_run_{self.updates_completed:06d}.pt"
+				)
+				return 0.0
+
+		logs = []
+		with patch("car_training.DrivingSimulation", FakeSimulation), patch(
+			"car_training.SharedPolicyTrainer", FakeTrainer
+		), patch(
+			"builtins.print",
+			side_effect=lambda *args, **_kwargs: logs.append(" ".join(map(str, args))),
+		):
+			trainer = train_headless(
+				environments=5,
+				updates=2,
+				device="cpu",
+				async_reset=True,
+				async_episodes=2,
+				async_transitions=1000,
+				min_batch_episodes=2,
+				batch_by_episodes_only=True,
+			)
+
+		self.assertEqual(trainer.batch_sizes, [2, 2])
+		self.assertEqual(trainer.episodes_trained, 4)
+		batch_logs = [log for log in logs if log.startswith("Completed batch")]
+		self.assertIn("Completed batch 1/2", batch_logs[0])
+		self.assertIn("Completed batch 2/2", batch_logs[1])
+		self.assertEqual(
+			[log for log in logs if log.startswith("Checkpoint saved:")],
+			[
+				"Checkpoint saved: 3D_world_checkpoint_v1_run_000001.pt",
+				"Checkpoint saved: 3D_world_checkpoint_v1_run_000002.pt",
+			],
+		)
 
 
 class GameGuiTests(unittest.TestCase):
