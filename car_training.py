@@ -52,7 +52,7 @@ class _FinishedEpisode:
 
 def train_headless(
 	environments: int = 1000,
-	updates: int = 1000,
+	updates: int | None = 1000,
 	device: str = "cuda",
 	minibatch_size: int = 4096,
 	optimization_epochs: int = 4,
@@ -76,7 +76,7 @@ def train_headless(
 	"""Run concurrent simulations and update the shared policy on each finish."""
 	if environments <= 0:
 		raise ValueError("environments must be positive")
-	if updates <= 0:
+	if updates is not None and updates <= 0:
 		raise ValueError("updates must be positive")
 	if report_every <= 0:
 		raise ValueError("report_every must be positive")
@@ -98,11 +98,15 @@ def train_headless(
 	checkpoint = (
 		Path(checkpoint_path)
 		if checkpoint_path is not None
+<<<<<<< HEAD
 		else _default_checkpoint_path(
 			async_reset=async_reset,
 			obs_v2=obs_v2,
 			hidden_sizes=hidden_sizes,
 		)
+=======
+		else Path(__file__).with_name("car_ai_shared_checkpoint_v2.pt")
+>>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 	)
 	trainer = SharedPolicyTrainer(
 		(
@@ -159,6 +163,7 @@ def train_headless(
 			curriculum=curriculum,
 		)
 
+<<<<<<< HEAD
 	observation_size = (
 		DrivingSimulation.OBSERVATION_V2_SIZE
 		if obs_v2
@@ -175,6 +180,29 @@ def train_headless(
 	report_loss = 0.0
 	report_reasons: dict[str, int] = {}
 	recent_distances: deque[float] = deque(maxlen=100)
+=======
+	local_update = 1
+	while updates is None or local_update <= updates:
+		rollouts = [
+			EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+			for _ in simulations
+		]
+		active = list(range(environments))
+		while active:
+			observations = [simulations[index].observe() for index in active]
+			actions = trainer.sample_actions(observations)
+			next_active = []
+			for index, observation, (action, log_probability) in zip(
+				active, observations, actions
+			):
+				result = simulations[index].step(action, dt=1.0 / 30.0)
+				rollouts[index].append(
+					observation, action, result.reward, log_probability
+				)
+				if not result.done:
+					next_active.append(index)
+			active = next_active
+>>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 	while trainer.updates_completed < target_update:
 		observations = [simulation.observe() for simulation in simulations]
@@ -412,6 +440,7 @@ def _train_auto_reset(
 			minibatch_size=minibatch_size,
 			optimization_epochs=optimization_epochs,
 		)
+<<<<<<< HEAD
 		# The trainer owns one live policy shared by every environment, so the
 		# next vector tick automatically uses its new weights and update version.
 		policy_version = trainer.updates_completed
@@ -470,5 +499,34 @@ def _train_auto_reset(
 		window_transitions = 0
 		window_slot_samples = 0
 		window_ticks = 0
+=======
+		if (
+			local_update % report_every == 0
+			or (updates is not None and local_update == updates)
+		):
+			mean_distance = sum(
+				simulation.player.distance for simulation in simulations
+			) / environments
+			reason_counts: dict[str, int] = {}
+			for simulation in simulations:
+				reason = simulation.crash_reason or "unknown"
+				reason_counts[reason] = reason_counts.get(reason, 0) + 1
+			reason_summary = ", ".join(
+				f"{reason}: {count}" for reason, count in sorted(reason_counts.items())
+			)
+			learning_rate = trainer.optimizer.param_groups[0]["lr"]
+			print(
+				f"Update {trainer.updates_completed} "
+				f"({local_update}/{updates or 'until stopped'}) | "
+				f"{environments} episodes | "
+				f"mean distance {mean_distance:.1f} m | "
+				f"loss {loss:.4f} | lr {learning_rate:.2e} | "
+				f"{reason_summary}"
+			)
+
+		for simulation in simulations:
+			simulation.reset()
+		local_update += 1
+>>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 	return trainer

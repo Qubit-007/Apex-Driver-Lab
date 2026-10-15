@@ -4,7 +4,7 @@ from pathlib import Path
 from array import array
 from dataclasses import dataclass, field
 import tempfile
-from typing import List, Sequence, Tuple
+from typing import List, Mapping, Sequence, Tuple
 import uuid
 import warnings
 
@@ -13,6 +13,51 @@ from torch import Tensor, nn
 from torch.distributions import Categorical
 
 from car_simulation import Observation
+
+
+def _load_policy_state(
+	policy: "DrivingPolicy",
+	saved_state: Mapping[str, Tensor],
+) -> bool:
+	"""Load policy weights, migrating two inserted observation features if needed."""
+	current_state = policy.state_dict()
+	first_layer_key = "layers.0.weight"
+	current_first_layer = current_state[first_layer_key]
+	saved_first_layer = saved_state[first_layer_key]
+	if saved_first_layer.shape == current_first_layer.shape:
+		policy.load_state_dict(saved_state)
+		return False
+	if (
+		saved_first_layer.shape[0] != current_first_layer.shape[0]
+		or saved_first_layer.shape[1] + 2 != current_first_layer.shape[1]
+	):
+		raise RuntimeError("checkpoint policy dimensions are incompatible")
+
+	migrated_state = {}
+	for key, current_tensor in current_state.items():
+		old_tensor = saved_state.get(key)
+		if key == first_layer_key:
+			first_layer = torch.zeros_like(current_tensor)
+			first_layer[:, :3] = old_tensor[:, :3]
+			first_layer[:, 5:] = old_tensor[:, 3:]
+			migrated_state[key] = first_layer
+		elif old_tensor is None or old_tensor.shape != current_tensor.shape:
+			raise RuntimeError("checkpoint policy dimensions are incompatible")
+		else:
+			migrated_state[key] = old_tensor
+	policy.load_state_dict(migrated_state)
+	return True
+
+
+def _shared_checkpoint_version(path: Path) -> int:
+	"""Extract the numeric version from a versioned shared checkpoint filename."""
+	if not path.name.startswith("car_ai_shared_checkpoint_v"):
+		return -1
+	version = path.stem.rsplit("_v", 1)[-1]
+	try:
+		return int(version)
+	except ValueError:
+		return -1
 
 
 @dataclass
@@ -86,7 +131,7 @@ class OnlineDriver:
 	def __init__(
 		self,
 		observation_size: int,
-		checkpoint_path: Path | str = Path(__file__).with_name("car_ai_checkpoint_v4.pt"),
+		checkpoint_path: Path | str = Path(__file__).with_name("car_ai_checkpoint_v5.pt"),
 		device: torch.device | str | None = None,
 		learning_rate: float = 3e-4,
 		gamma: float = 0.99,
@@ -105,7 +150,17 @@ class OnlineDriver:
 		self._log_probabilities: List[Tensor] = []
 		self._rewards: List[float] = []
 		self.episodes_trained = 0
+		self.training_source = "NEW POLICY"
+		self.training_progress = 0
+		self.loaded_checkpoint: Path | None = None
 		self.load_checkpoint()
+
+	@property
+	def training_status(self) -> str:
+		"""Describe the checkpoint source and its matching progress counter."""
+		if self.training_source == "HEADLESS POLICY":
+			return f"{self.training_source}  |  UPDATE {self.training_progress}"
+		return f"{self.training_source}  |  EPISODE {self.training_progress}"
 
 	def choose_action(self, observation: Observation) -> Tuple[int, Tensor]:
 		"""Sample a driving action and return its differentiable log probability."""
@@ -156,6 +211,8 @@ class OnlineDriver:
 
 	def save_checkpoint(self) -> None:
 		"""Save a rotating generation to avoid replacing OneDrive-locked files."""
+		self.training_source = "GUI POLICY"
+		self.training_progress = self.episodes_trained
 		self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 		payload = {
 			"policy": self.policy.state_dict(),
@@ -199,12 +256,16 @@ class OnlineDriver:
 					stacklevel=2,
 				)
 
-	def _checkpoint_generations(self) -> List[Path]:
+	def _checkpoint_generations(
+		self,
+		checkpoint_path: Path | None = None,
+	) -> List[Path]:
 		"""Return generated checkpoints newest first."""
-		generation_marker = f"{self.checkpoint_path.stem}_run_"
+		checkpoint_path = checkpoint_path or self.checkpoint_path
+		generation_marker = f"{checkpoint_path.stem}_run_"
 		generations = list(
-			self.checkpoint_path.parent.glob(
-				f"{self.checkpoint_path.stem}_run_*{self.checkpoint_path.suffix}"
+			checkpoint_path.parent.glob(
+				f"{checkpoint_path.stem}_run_*{checkpoint_path.suffix}"
 			)
 		)
 
@@ -220,18 +281,57 @@ class OnlineDriver:
 
 	def load_checkpoint(self) -> bool:
 		"""Load persisted training state, returning false only when no checkpoint exists."""
-		generations = self._checkpoint_generations()
-		source = generations[0] if generations else self.checkpoint_path
-		if not source.exists():
+		checkpoint_paths = [self.checkpoint_path]
+		if self.checkpoint_path.stem.endswith("_v5"):
+			checkpoint_paths.extend((
+				self.checkpoint_path.with_name(
+					f"{self.checkpoint_path.stem[:-1]}4{self.checkpoint_path.suffix}"
+				),
+				self.checkpoint_path.with_name("car_ai_shared_checkpoint_v2.pt"),
+				self.checkpoint_path.with_name("car_ai_shared_checkpoint_v1.pt"),
+			))
+		checkpoint_candidates = []
+		for checkpoint_path in checkpoint_paths:
+			generations = self._checkpoint_generations(checkpoint_path)
+			candidate = generations[0] if generations else checkpoint_path
+			if candidate.exists():
+				checkpoint_candidates.append(candidate)
+		if not checkpoint_candidates:
 			return False
+
+		# Prefer the newest shared checkpoint when it exists, instead of the more
+		# recently modified GUI checkpoint. This keeps OnlineDriver aligned with the
+		# headless training policy during mixed-mode runs.
+		shared_candidates = [
+			path for path in checkpoint_candidates if "shared" in path.name
+		]
+		if shared_candidates:
+			shared_candidates.sort(
+				key=lambda path: (
+					_shared_checkpoint_version(path),
+					path.stat().st_mtime_ns,
+				),
+				reverse=True,
+			)
+			source = shared_candidates[0]
+		else:
+			source = max(checkpoint_candidates, key=lambda path: path.stat().st_mtime_ns)
 		checkpoint = torch.load(
 			source,
 			map_location=self.device,
 			weights_only=True,
 		)
-		self.policy.load_state_dict(checkpoint["policy"])
-		self.optimizer.load_state_dict(checkpoint["optimizer"])
+		migrated = _load_policy_state(self.policy, checkpoint["policy"])
+		if not migrated:
+			self.optimizer.load_state_dict(checkpoint["optimizer"])
 		self.episodes_trained = int(checkpoint["episodes_trained"])
+		self.loaded_checkpoint = source
+		if "shared" in source.name:
+			self.training_source = "HEADLESS POLICY"
+			self.training_progress = int(checkpoint.get("updates_completed", 0))
+		else:
+			self.training_source = "GUI POLICY"
+			self.training_progress = self.episodes_trained
 		return True
 
 
@@ -239,8 +339,11 @@ class SharedPolicyTrainer:
 	"""Train one shared policy immediately from completed parallel episodes."""
 
 	CHECKPOINT_VERSION = 2
+<<<<<<< HEAD
 	PPO_CLIP_RANGE = 0.2
 	ENTROPY_COEFFICIENT = 0.01
+=======
+>>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 	def __init__(
 		self,
@@ -531,12 +634,16 @@ class SharedPolicyTrainer:
 					stacklevel=2,
 				)
 
-	def _checkpoint_generations(self) -> List[Path]:
+	def _checkpoint_generations(
+		self,
+		checkpoint_path: Path | None = None,
+	) -> List[Path]:
+		checkpoint_path = checkpoint_path or self.checkpoint_path
 		generation_pattern = (
-			f"{self.checkpoint_path.stem}_run_*{self.checkpoint_path.suffix}"
+			f"{checkpoint_path.stem}_run_*{checkpoint_path.suffix}"
 		)
-		generations = list(self.checkpoint_path.parent.glob(generation_pattern))
-		prefix = f"{self.checkpoint_path.stem}_run_"
+		generations = list(checkpoint_path.parent.glob(generation_pattern))
+		prefix = f"{checkpoint_path.stem}_run_"
 
 		def generation_key(path: Path) -> Tuple[int, int]:
 			try:
@@ -551,6 +658,12 @@ class SharedPolicyTrainer:
 		"""Restore shared training state when its versioned checkpoint exists."""
 		generations = self._checkpoint_generations()
 		source = generations[0] if generations else self.checkpoint_path
+		if not source.exists() and self.checkpoint_path.stem.endswith("_v2"):
+			legacy_path = self.checkpoint_path.with_name(
+				f"{self.checkpoint_path.stem[:-1]}1{self.checkpoint_path.suffix}"
+			)
+			legacy_generations = self._checkpoint_generations(legacy_path)
+			source = legacy_generations[0] if legacy_generations else legacy_path
 		if not source.exists():
 			return False
 		checkpoint = torch.load(
@@ -558,15 +671,24 @@ class SharedPolicyTrainer:
 			map_location=self.device,
 			weights_only=True,
 		)
-		if checkpoint.get("version") != self.CHECKPOINT_VERSION:
+		version = checkpoint.get("version")
+		migrated = version == 1 and _load_policy_state(
+			self.policy,
+			checkpoint["policy"],
+		)
+		if version != self.CHECKPOINT_VERSION and not migrated:
 			raise RuntimeError(
 				f"Unsupported shared checkpoint version in {self.checkpoint_path}"
 			)
+		self.gamma = float(checkpoint["gamma"])
+		if migrated:
+			self.updates_completed = int(checkpoint["updates_completed"])
+			self.episodes_trained = int(checkpoint["episodes_trained"])
+			return True
 		self.learning_rate = float(checkpoint["learning_rate"])
 		self.minimum_learning_rate = float(checkpoint["minimum_learning_rate"])
 		self.learning_rate_decay = float(checkpoint["learning_rate_decay"])
-		self.gamma = float(checkpoint["gamma"])
-		self.policy.load_state_dict(checkpoint["policy"])
+		_load_policy_state(self.policy, checkpoint["policy"])
 		self.optimizer.load_state_dict(checkpoint["optimizer"])
 		self.scheduler.load_state_dict(checkpoint["scheduler"])
 		self.updates_completed = int(checkpoint["updates_completed"])

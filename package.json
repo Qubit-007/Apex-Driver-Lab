@@ -1,0 +1,8 @@
+{
+  "name": "quantum-wave-simulation-with-ai",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:web": "node --check web/app.js"
+  }
+}
