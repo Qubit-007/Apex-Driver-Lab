@@ -17,6 +17,7 @@ const ui = {
 	steerIndicator: document.querySelector('#steer-indicator'),
 	throttle: document.querySelector('#throttle-slider'),
 	throttleValue: document.querySelector('#throttle-value'),
+	modeToggle: document.querySelector('#mode-toggle'),
 	pause: document.querySelector('#pause-toggle'),
 	reset: document.querySelector('#reset-button'),
 	frame: document.querySelector('#frame-status'),
@@ -41,8 +42,10 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.22;
 mount.appendChild(renderer.domElement);
 
-scene.add(new THREE.HemisphereLight(0x8198e8, 0x211b3b, 1.65));
-scene.add(new THREE.AmbientLight(0x514477, 0.9));
+const ambientLight = new THREE.HemisphereLight(0x8198e8, 0x211b3b, 1.65);
+scene.add(ambientLight);
+const fillLight = new THREE.AmbientLight(0x514477, 0.9);
+scene.add(fillLight);
 const moonlight = new THREE.DirectionalLight(0x9dbdff, 2.2);
 moonlight.position.set(-18, 34, 15);
 moonlight.castShadow = true;
@@ -69,11 +72,18 @@ const roadMaterial = new THREE.MeshStandardMaterial({
 	metalness: 0.42,
 });
 const shoulderMaterial = new THREE.MeshStandardMaterial({ color: 0x22243a, roughness: 0.62, metalness: 0.2 });
+const sidewalkMaterial = new THREE.MeshStandardMaterial({ color: 0x33374b, roughness: 0.72, metalness: 0.16 });
 const curbMaterials = [
-	new THREE.MeshStandardMaterial({ color: 0xff3e99, emissive: 0x9e124f, emissiveIntensity: 1.5, roughness: 0.35 }),
-	new THREE.MeshStandardMaterial({ color: 0x65f8ff, emissive: 0x147d9b, emissiveIntensity: 1.35, roughness: 0.35 }),
+	new THREE.MeshStandardMaterial({ color: 0xff3e99, emissive: 0xff167e, emissiveIntensity: 2.4, roughness: 0.35, side: THREE.DoubleSide }),
+	new THREE.MeshStandardMaterial({ color: 0x65f8ff, emissive: 0x12cfff, emissiveIntensity: 2.3, roughness: 0.35, side: THREE.DoubleSide }),
 ];
-const centerMaterial = new THREE.MeshStandardMaterial({ color: 0x8debf4, emissive: 0x216b83, emissiveIntensity: 0.65, roughness: 0.44 });
+const centerMaterial = new THREE.MeshStandardMaterial({
+	color: 0xb9faff,
+	emissive: 0x42d9ff,
+	emissiveIntensity: 1.25,
+	roughness: 0.38,
+	side: THREE.DoubleSide,
+});
 const roadSegments = 180;
 const roadLength = 270;
 const roadWidth = 12;
@@ -150,32 +160,56 @@ roadRoot.add(stripMesh(-1, 0, roadWidth / 2, roadMaterial, 0));
 roadRoot.add(stripMesh(1, 0, roadWidth / 2, roadMaterial, 0));
 roadRoot.add(stripMesh(-1, roadWidth / 2, 2.5, shoulderMaterial, 0.005));
 roadRoot.add(stripMesh(1, roadWidth / 2, 2.5, shoulderMaterial, 0.005));
+roadRoot.add(stripMesh(-1, roadWidth / 2 + 2.5, 4.5, sidewalkMaterial, -0.005));
+roadRoot.add(stripMesh(1, roadWidth / 2 + 2.5, 4.5, sidewalkMaterial, -0.005));
 
 function createRoadMarkings() {
 	const group = new THREE.Group();
 	group.userData.movingFeatures = [];
+	group.userData.edgeLines = [];
 	const addMarking = (length, width, material, laneOffset, trackZ, y) => {
 		const marking = createCurvedMarking(length, width, material, laneOffset, trackZ, y);
 		group.add(marking);
 		group.userData.movingFeatures.push(marking);
 	};
 	for (let z = 36; z > -roadLength + 45; z -= 9) {
-		addMarking(3.1, 0.12, centerMaterial, 0, z - 5, 0.035);
+		addMarking(4.4, 0.22, centerMaterial, 0, z - 5, 0.075);
 	}
-	for (let z = 42; z > -roadLength + 45; z -= 1.8) {
+	for (let z = 42; z > -roadLength + 45; z -= 2.2) {
 		const stripeMaterial = curbMaterials[Math.floor((42 - z) / 1.8) % 2];
 		for (const side of [-1, 1]) {
 			addMarking(
-				0.9,
-				0.12,
+				1.35,
+				0.2,
 				stripeMaterial,
-				side * (roadWidth / 2 - 0.08),
+				side * (roadWidth / 2 - 0.48),
 				z - 5,
-				0.045,
+				0.085,
 			);
 		}
 	}
+	for (const side of [-1, 1]) {
+		const edgeLine = createRoadEdgeLine(side);
+		group.add(edgeLine.mesh);
+		group.userData.edgeLines.push(edgeLine);
+	}
 	return group;
+}
+
+function createRoadEdgeLine(side) {
+	const positions = new Float32Array((roadSegments + 1) * 2 * 3);
+	const indices = [];
+	for (let index = 0; index < roadSegments; index += 1) {
+		const vertex = index * 2;
+		indices.push(vertex, vertex + 2, vertex + 1, vertex + 1, vertex + 2, vertex + 3);
+	}
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+	geometry.setIndex(indices);
+	const mesh = new THREE.Mesh(geometry, curbMaterials[side < 0 ? 0 : 1]);
+	mesh.frustumCulled = false;
+	mesh.receiveShadow = false;
+	return { mesh, geometry, side };
 }
 
 function createCurvedMarking(length, width, material, laneOffset, trackZ, y) {
@@ -189,6 +223,7 @@ function createCurvedMarking(length, width, material, laneOffset, trackZ, y) {
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
 	geometry.setIndex(indices);
+	geometry.computeVertexNormals();
 	const marking = new THREE.Mesh(geometry, material);
 	marking.userData.trackZ = trackZ;
 	marking.userData.laneOffset = laneOffset;
@@ -197,7 +232,8 @@ function createCurvedMarking(length, width, material, laneOffset, trackZ, y) {
 	marking.userData.segments = segments;
 	marking.userData.y = y;
 	marking.userData.movingMarking = true;
-	marking.receiveShadow = true;
+	marking.frustumCulled = false;
+	marking.receiveShadow = false;
 	return marking;
 }
 const roadMarkings = createRoadMarkings();
@@ -258,7 +294,7 @@ function makeCityBuilding(index, side, trackZ) {
 	const group = new THREE.Group();
 	const width = 8 + (index % 4) * 1.6;
 	const depth = 8 + (index % 3) * 2;
-	const distantTower = index >= 20;
+	const distantTower = index >= 20 && index < 40;
 	const height = distantTower
 		? 34 + ((index * 17) % 48)
 		: 18 + ((index * 13) % 30);
@@ -276,21 +312,23 @@ function makeCityBuilding(index, side, trackZ) {
 	const windows = new THREE.InstancedMesh(
 		buildingWindowGeometry,
 		windowMaterials[index % windowMaterials.length],
-		floors * columns,
+		floors * columns * 2,
 	);
 	const windowDummy = new THREE.Object3D();
 	let windowIndex = 0;
-	for (let floor = 0; floor < floors; floor += 1) {
-		for (let column = 0; column < columns; column += 1) {
-			if ((floor * 7 + column * 11 + index) % 5 === 0) continue;
-			windowDummy.position.set(
-				side > 0 ? -width / 2 - 0.045 : width / 2 + 0.045,
-				1.45 + floor * 2.25,
-				(column - (columns - 1) / 2) * 1.25,
-			);
-			windowDummy.updateMatrix();
-			windows.setMatrixAt(windowIndex, windowDummy.matrix);
-			windowIndex += 1;
+	for (const face of [side > 0 ? -1 : 1, side > 0 ? 1 : -1]) {
+		for (let floor = 0; floor < floors; floor += 1) {
+			for (let column = 0; column < columns; column += 1) {
+				if ((floor * 7 + column * 11 + index + (face < 0 ? 2 : 0)) % 5 === 0) continue;
+				windowDummy.position.set(
+					face * (width / 2 + 0.045),
+					1.45 + floor * 2.25,
+					(column - (columns - 1) / 2) * 1.25,
+				);
+				windowDummy.updateMatrix();
+				windows.setMatrixAt(windowIndex, windowDummy.matrix);
+				windowIndex += 1;
+			}
 		}
 	}
 	windows.count = windowIndex;
@@ -315,11 +353,12 @@ function makeCityBuilding(index, side, trackZ) {
 		group.add(sign);
 	}
 	group.userData.trackZ = trackZ;
-	group.userData.laneOffset = side * (
-		roadWidth / 2
-		+ (distantTower ? 76 : 38)
-		+ (index % 3) * (distantTower ? 18 : 10)
-	);
+	const roadsideOffset = distantTower
+		? 76 + (index % 3) * 18
+		: index >= 40
+			? 15 + (index % 4) * 3
+			: 38 + (index % 3) * 10;
+	group.userData.laneOffset = side * (roadWidth / 2 + roadsideOffset);
 	scene.add(group);
 	scenery.push(group);
 }
@@ -330,6 +369,88 @@ for (let index = 0; index < 20; index += 1) {
 for (let index = 0; index < 16; index += 1) {
 	makeCityBuilding(index + 20, index % 2 === 0 ? 1 : -1, 22 - index * 17);
 }
+for (let index = 0; index < 26; index += 1) {
+	makeCityBuilding(index + 40, index % 2 === 0 ? -1 : 1, 30 - index * 10);
+}
+
+const roadLights = [];
+const streetlightMetal = new THREE.MeshStandardMaterial({
+	color: 0x30374b,
+	metalness: 0.78,
+	roughness: 0.32,
+});
+const streetlightFixture = new THREE.MeshStandardMaterial({
+	color: 0xa7f9ff,
+	emissive: 0x48dfff,
+	emissiveIntensity: 2.4,
+});
+
+function makeStreetlight(index) {
+	const side = index % 2 === 0 ? -1 : 1;
+	const group = new THREE.Group();
+	const base = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.38, 0.22, 8), streetlightMetal);
+	base.position.y = 0.11;
+	group.add(base);
+	const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 5.5, 8), streetlightMetal);
+	pole.position.y = 2.86;
+	pole.castShadow = true;
+	group.add(pole);
+	const arm = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.12, 0.14), streetlightMetal);
+	arm.position.set(-side * 0.48, 5.52, 0);
+	group.add(arm);
+	const fixture = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.16, 0.38), streetlightMetal);
+	fixture.position.set(-side * 0.9, 5.42, 0);
+	group.add(fixture);
+	const bulb = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.045, 0.27), streetlightFixture);
+	bulb.position.set(-side * 0.9, 5.32, 0);
+	group.add(bulb);
+	const light = new THREE.PointLight(0x91eaff, 30, 38, 1.6);
+	light.position.set(-side * 0.9, 5.15, 0);
+	light.castShadow = false;
+	light.visible = false;
+	group.add(light);
+
+	group.userData.trackZ = 36 - index * 23;
+	group.userData.laneOffset = side * 8.2;
+	group.userData.side = side;
+	group.userData.light = light;
+	group.userData.bulb = bulb;
+	group.userData.active = false;
+	group.userData.distance = Infinity;
+	scene.add(group);
+	roadLights.push(group);
+}
+
+for (let index = 0; index < 12; index += 1) makeStreetlight(index);
+
+const daySkyObjects = new THREE.Group();
+const sunDisc = new THREE.Mesh(
+	new THREE.SphereGeometry(10, 24, 16),
+	new THREE.MeshBasicMaterial({ color: 0xffe7a6, toneMapped: false }),
+);
+sunDisc.position.set(-88, 74, -225);
+daySkyObjects.add(sunDisc);
+const cloudMaterial = new THREE.MeshStandardMaterial({
+	color: 0xe5edf5,
+	roughness: 1,
+	flatShading: true,
+});
+for (let index = 0; index < 10; index += 1) {
+	const cloud = new THREE.Group();
+	const scale = 1.8 + (index % 4) * 0.65;
+	for (let puff = 0; puff < 4; puff += 1) {
+		const shape = new THREE.Mesh(
+			new THREE.IcosahedronGeometry(scale * (0.48 + (puff % 2) * 0.12), 1),
+			cloudMaterial,
+		);
+		shape.position.set((puff - 1.5) * scale * 0.65, Math.sin(puff * 2) * scale * 0.1, (puff % 2) * scale * 0.2);
+		cloud.add(shape);
+	}
+	cloud.position.set(-105 + index * 23, 42 + (index % 3) * 9, -90 - (index % 4) * 42);
+	daySkyObjects.add(cloud);
+}
+daySkyObjects.visible = false;
+scene.add(daySkyObjects);
 
 const cars = [];
 const carColors = [0x79b7c8, 0xd8b967, 0xd67a65, 0x94a7d0, 0xe5e0d1];
@@ -548,6 +669,7 @@ const state = {
 	targetSteering: 0,
 	laneChange: null,
 	throttle: 0.62,
+	dayMode: localStorage.getItem('apex-drive-mode') === 'day',
 	paused: false,
 	manualUntil: 0,
 	avoidanceCar: null,
@@ -913,6 +1035,28 @@ function updateTrackView() {
 		feature.geometry.computeVertexNormals();
 	}
 
+	for (const edgeLine of roadMarkings.userData.edgeLines) {
+		const positions = edgeLine.geometry.attributes.position;
+		for (let index = 0; index <= roadSegments; index += 1) {
+			const offset = roadBehind - index * segmentLength;
+			const trackZ = -state.distance + offset;
+			const slope = trackSlope(trackZ);
+			const normalScale = 1 / Math.sqrt(1 + slope * slope);
+			for (let edge = 0; edge < 2; edge += 1) {
+				const lateral = edgeLine.side * (roadWidth / 2 - 0.12 + (edge === 0 ? -0.1 : 0.1));
+				const vertex = index * 2 + edge;
+				positions.setXYZ(
+					vertex,
+					trackCenter(trackZ) + lateral * normalScale,
+					0.07,
+					5 + offset - lateral * slope * normalScale,
+				);
+			}
+		}
+		positions.needsUpdate = true;
+		edgeLine.geometry.computeVertexNormals();
+	}
+
 	for (const tree of scenery) {
 		let offset = tree.userData.trackZ + state.distance;
 		while (offset > roadBehind) {
@@ -926,6 +1070,109 @@ function updateTrackView() {
 		tree.position.x = trackCenter(-state.distance + offset) + tree.userData.laneOffset;
 		tree.position.z = 5 + offset;
 	}
+
+	for (const lamp of roadLights) {
+		let offset = lamp.userData.trackZ + state.distance;
+		while (offset > roadBehind) {
+			lamp.userData.trackZ -= roadLength;
+			offset -= roadLength;
+		}
+		while (offset < -roadAhead) {
+			lamp.userData.trackZ += roadLength;
+			offset += roadLength;
+		}
+		const trackZ = lamp.userData.trackZ;
+		const laneOffset = lamp.userData.laneOffset;
+		const slope = trackSlope(trackZ);
+		const normalLength = Math.hypot(1.1, slope);
+		lamp.position.set(
+			trackCenter(trackZ) + laneOffset * 1.1 / normalLength,
+			0,
+			5 + offset - laneOffset * slope / normalLength,
+		);
+		const before = trackPoint(-trackZ - 0.5, laneOffset, 0);
+		const after = trackPoint(-trackZ + 0.5, laneOffset, 0);
+		lamp.rotation.y = Math.atan2(-(after.x - before.x), -(after.z - before.z));
+		lamp.userData.distance = Math.abs(offset);
+	}
+	const nearestLamps = [...roadLights]
+		.sort((left, right) => left.userData.distance - right.userData.distance)
+		.slice(0, 4);
+	for (const lamp of roadLights) {
+		lamp.userData.active = nearestLamps.includes(lamp);
+		lamp.userData.light.visible = !state.dayMode && lamp.userData.active;
+	}
+}
+
+function applyDriveMode() {
+	const isDay = state.dayMode;
+	document.body.classList.toggle('day-mode', isDay);
+	scene.background.set(isDay ? 0x9fc5e8 : 0x090b1b);
+	scene.fog.color.set(isDay ? 0x9fc5e8 : 0x090b1b);
+	daySkyObjects.visible = isDay;
+	scene.fog.near = isDay ? 150 : 105;
+	scene.fog.far = isDay ? 330 : 285;
+	ambientLight.color.set(isDay ? 0xd7e9ff : 0x8198e8);
+	ambientLight.groundColor.set(isDay ? 0x586379 : 0x211b3b);
+	ambientLight.intensity = isDay ? 2.0 : 1.65;
+	fillLight.color.set(isDay ? 0xffe9cf : 0x514477);
+	fillLight.intensity = isDay ? 0.8 : 0.9;
+	moonlight.color.set(isDay ? 0xffedcf : 0x9dbdff);
+	moonlight.intensity = isDay ? 3.2 : 2.2;
+	renderer.toneMappingExposure = isDay ? 1.12 : 1.22;
+
+	groundMaterial.color.set(isDay ? 0x697386 : 0x080a15);
+	roadMaterial.color.set(isDay ? 0x5d6878 : 0x414457);
+	roadMaterial.emissive.set(isDay ? 0x080a10 : 0x161a30);
+	roadMaterial.emissiveIntensity = isDay ? 0.08 : 0.55;
+	roadMaterial.roughness = isDay ? 0.72 : 0.34;
+	roadMaterial.metalness = isDay ? 0.08 : 0.42;
+	shoulderMaterial.color.set(isDay ? 0x727988 : 0x22243a);
+	sidewalkMaterial.color.set(isDay ? 0x9ca5b1 : 0x33374b);
+	curbMaterials[0].color.set(isDay ? 0xe5e7ed : 0xff3e99);
+	curbMaterials[0].emissive.set(isDay ? 0x000000 : 0x9e124f);
+	curbMaterials[0].emissiveIntensity = isDay ? 0 : 1.5;
+	curbMaterials[1].color.set(isDay ? 0xf0c85e : 0x65f8ff);
+	curbMaterials[1].emissive.set(isDay ? 0x000000 : 0x147d9b);
+	curbMaterials[1].emissiveIntensity = isDay ? 0 : 1.35;
+	centerMaterial.color.set(isDay ? 0xf2f0dc : 0x8debf4);
+	centerMaterial.emissive.set(isDay ? 0x000000 : 0x216b83);
+	centerMaterial.emissiveIntensity = isDay ? 0 : 0.65;
+
+	for (const material of buildingMaterials) {
+		material.color.set(isDay ? 0x9aa9bd : material === buildingMaterials[0] ? 0x17182c : material === buildingMaterials[1] ? 0x20203a : 0x191d32);
+	}
+	const nightWindowColors = [0x67e8ff, 0xff6ac1, 0xffd784];
+	const nightWindowEmissives = [0x35b6ff, 0xff258d, 0xffa93d];
+	windowMaterials.forEach((material, index) => {
+		material.color.set(isDay ? 0xbac9d9 : nightWindowColors[index]);
+		material.emissive.set(isDay ? 0x526071 : nightWindowEmissives[index]);
+		material.emissiveIntensity = isDay ? 0.12 : [2.6, 2.4, 1.8][index];
+	});
+	cityAccents.forEach((material, index) => {
+		material.color.set(isDay ? 0x7393a8 : index === 0 ? 0x4cf5ff : 0xff58bb);
+		material.emissive.set(isDay ? 0x1b3447 : index === 0 ? 0x12c9ff : 0xff1686);
+		material.emissiveIntensity = isDay ? 0.35 : 3.2;
+	});
+	for (const material of signMaterial) material.color.set(isDay ? 0xc5d6e8 : 0xffffff);
+	streetlightMetal.color.set(isDay ? 0x9ba8b8 : 0x30374b);
+	streetlightFixture.color.set(isDay ? 0x78879a : 0xa7f9ff);
+	streetlightFixture.emissiveIntensity = isDay ? 0 : 2.4;
+	for (const lamp of roadLights) {
+		lamp.userData.light.visible = !isDay && lamp.userData.active;
+	}
+
+	const buttonLabel = isDay ? 'NIGHT MODE' : 'DAY MODE';
+	const targetLabel = isDay ? 'Switch to night mode' : 'Switch to day mode';
+	ui.modeToggle.querySelector('span').textContent = buttonLabel;
+	ui.modeToggle.setAttribute('aria-label', targetLabel);
+	ui.modeToggle.setAttribute('aria-pressed', String(isDay));
+	ui.modeToggle.title = targetLabel;
+	ui.modeToggle.querySelector('svg').innerHTML = isDay
+		? '<path d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5 8.5 8.5 0 1 0 20.5 15.5Z"></path><path d="M16 3v3m-1.5-1.5h3"></path>'
+		: '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"></path>';
+	document.querySelector('#weather-label').textContent = isDay ? 'CLEAR / DAYLIGHT' : 'MIDNIGHT / NIGHT DRIVE';
+	document.querySelector('meta[name="theme-color"]').content = isDay ? '#e7eef7' : '#111815';
 }
 
 function updateHud() {
@@ -951,7 +1198,9 @@ function updateHud() {
 	const throttlePercent = Math.round(THREE.MathUtils.clamp((state.throttle + 0.25) / 1.3, 0, 1) * 100);
 	ui.throttleValue.textContent = `${throttlePercent}%`;
 	ui.throttle.value = String(throttlePercent);
-	ui.throttle.style.background = `linear-gradient(90deg, #c7e27b ${throttlePercent}%, #354239 ${throttlePercent}%)`;
+	const throttleFill = state.dayMode ? '#138e9d' : '#c7e27b';
+	const throttleTrack = state.dayMode ? '#d6dfe8' : '#354239';
+	ui.throttle.style.background = `linear-gradient(90deg, ${throttleFill} ${throttlePercent}%, ${throttleTrack} ${throttlePercent}%)`;
 }
 
 function render(now) {
@@ -1042,6 +1291,11 @@ ui.pause.addEventListener('click', () => {
 });
 document.querySelector('#sound-toggle').addEventListener('click', () => setSoundEnabled(!soundEnabled));
 ui.reset.addEventListener('click', resetRun);
+ui.modeToggle.addEventListener('click', () => {
+	state.dayMode = !state.dayMode;
+	localStorage.setItem('apex-drive-mode', state.dayMode ? 'day' : 'night');
+	applyDriveMode();
+});
 
 function resetRun() {
 	if (state.distance > state.best) {
@@ -1066,4 +1320,5 @@ function resetRun() {
 }
 
 updateHud();
+applyDriveMode();
 requestAnimationFrame(render);
