@@ -81,6 +81,51 @@ resume from `car_ai_shared_checkpoint_v2_run_*.pt`; async runs default to the
 separate `car_ai_async_checkpoint_v1_run_*.pt` family. Use `--checkpoint` to
 select a different family explicitly.
 
+## Observation and traffic A/B options
+
+By default, training retains the original 21-value observation and two
+256-unit tanh layers. `--obs_v2` / `--obs-v2` selects 26 ego-relative values:
+four traffic slots (ahead in lane, ahead-left, ahead-right, nearest behind),
+each with proximity-weighted relative distance, lateral offset, relative
+speed, TTC, and presence; then lane offset, road heading error, curvature at
+10/20/40 m, and own speed. Empty traffic slots use distance 1 and presence 0.
+Heading is estimated from the road centerline because the simulator does not
+track the vehicle's yaw separately. Enabling this mode also randomizes initial
+speed, lateral position, and traffic spawn positions.
+
+`--hidden` sets comma-separated tanh layer widths, for example
+`--hidden 64,64`; its default is `256,256`. New observation/network variants
+use orthogonal initialization for hidden layers and a small output-layer gain
+to start with low-magnitude action logits. This is a categorical policy, so
+there is no continuous-action standard deviation; the existing entropy bonus
+(0.01) encourages early action exploration.
+
+Traffic controls are `--traffic_density` (active-car cap, default 14, zero
+allowed), `--traffic_speed` (km/h, default 20), and `--ai_min_speed` (km/h,
+default 40). `--curriculum` uses a rolling mean of the last 100 completed
+episode distances to raise the traffic cap by one car per 100 m of mean
+distance; it begins with 0-1 cars spawned within the first 100 m. It is
+bounded by `--traffic_density`.
+
+Example A/B commands (run from the repository root):
+
+```powershell
+# (a) Existing observation/network/training setup
+.\quantum\Scripts\python.exe .\car.py --mode headless --async_reset --environments 1000 --updates 100 --checkpoint .\baseline_old.pt
+
+# (b) New observations and smaller network, no traffic
+.\quantum\Scripts\python.exe .\car.py --mode headless --async_reset --obs_v2 --hidden 64,64 --traffic_density 0 --environments 1000 --updates 100 --checkpoint .\obs_v2_no_traffic.pt
+
+# (c) New observations/network with traffic curriculum
+.\quantum\Scripts\python.exe .\car.py --mode headless --async_reset --obs_v2 --hidden 64,64 --traffic_density 14 --traffic_speed 20 --ai_min_speed 40 --curriculum --environments 1000 --updates 100 --checkpoint .\obs_v2_curriculum.pt
+```
+
+Model variants automatically use separate default checkpoint names based on
+observation version, hidden widths, and collector mode. Reusing a custom
+`--checkpoint` across incompatible observation sizes or network shapes will
+fail to load; use separate checkpoint paths for A/B runs. GUI mode currently
+supports only the original observation and network options.
+
 Verify CUDA in the configured environment with:
 
 ```powershell

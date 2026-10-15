@@ -105,6 +105,85 @@ class DrivingSimulationTests(unittest.TestCase):
 			/ simulation.LATERAL_DISTANCE_SCALE,
 		)
 
+	def test_obs_v2_has_fixed_ego_slots_and_normalized_features(self) -> None:
+		simulation = DrivingSimulation(
+			traffic_count=0,
+			seed=2,
+			obs_v2=True,
+			randomize_starts=False,
+		)
+		simulation.player.speed = 20.0
+		simulation.traffic = [
+			TrafficCar(distance=40.0, lateral=0.0, speed=10.0, car_id=1),
+			TrafficCar(distance=30.0, lateral=-3.2, speed=20.0, car_id=2),
+			TrafficCar(distance=50.0, lateral=3.2, speed=20.0, car_id=3),
+			TrafficCar(distance=-12.0, lateral=2.0, speed=22.0, car_id=4),
+		]
+
+		observation = simulation.observe()
+
+		self.assertEqual(len(observation), simulation.OBSERVATION_V2_SIZE)
+		self.assertTrue(all(-1.0 <= value <= 1.0 for value in observation))
+		self.assertEqual(
+			[observation[index] for index in (4, 9, 14, 19)],
+			[1.0, 1.0, 1.0, 1.0],
+		)
+		self.assertGreater(observation[0], 0.0)
+		self.assertLess(observation[6], 0.0)
+		self.assertGreater(observation[10], 0.0)
+		self.assertLess(observation[15], 0.0)
+		self.assertGreater(observation[3], 0.0)
+		self.assertTrue(-1.0 <= observation[-1] <= 1.0)
+
+	def test_obs_v2_empty_and_far_slots_have_no_false_proximity(self) -> None:
+		simulation = DrivingSimulation(
+			traffic_count=0,
+			seed=4,
+			obs_v2=True,
+			randomize_starts=False,
+		)
+		empty_observation = simulation.observe()
+		self.assertEqual(empty_observation[:5], (1.0, 0.0, 0.0, 0.0, 0.0))
+
+		simulation.traffic = [
+			TrafficCar(
+				distance=1000.0,
+				lateral=3.2,
+				speed=simulation.traffic_speed,
+				car_id=1,
+			)
+		]
+		far_observation = simulation.observe()
+		self.assertEqual(far_observation[14], 1.0)
+		self.assertLess(abs(far_observation[10]), 0.01)
+		self.assertLess(abs(far_observation[11]), 0.01)
+		self.assertLess(abs(far_observation[12]), 0.01)
+		self.assertLess(abs(far_observation[13]), 0.01)
+
+	def test_traffic_controls_curriculum_and_randomized_resets(self) -> None:
+		simulation = DrivingSimulation(
+			traffic_count=6,
+			seed=9,
+			obs_v2=True,
+			traffic_speed_kmh=30.0,
+			ai_min_speed_kmh=50.0,
+			randomize_starts=True,
+			curriculum=True,
+		)
+		self.assertIn(len(simulation.traffic), (0, 1))
+		self.assertTrue(all(car.speed == 30.0 / 3.6 for car in simulation.traffic))
+		self.assertGreaterEqual(simulation.player.speed, 50.0 / 3.6)
+		first_start = (simulation.player.speed, simulation.player.lateral)
+
+		simulation.set_curriculum_distance(250.0)
+		simulation.reset()
+		self.assertEqual(simulation.traffic_count, 3)
+		self.assertGreaterEqual(simulation.player.speed, 50.0 / 3.6)
+		self.assertNotEqual(
+			first_start,
+			(simulation.player.speed, simulation.player.lateral),
+		)
+
 	def test_player_brakes_but_never_goes_below_40_kmh(self) -> None:
 		simulation = DrivingSimulation(traffic_count=0, seed=5)
 		self.assertGreaterEqual(
@@ -272,6 +351,18 @@ class OnlineDriverTests(unittest.TestCase):
 
 
 class SharedPolicyTrainerTests(unittest.TestCase):
+	def test_policy_supports_configurable_hidden_sizes(self) -> None:
+		from car_ai import DrivingPolicy
+
+		policy = DrivingPolicy(DrivingSimulation.OBSERVATION_V2_SIZE, hidden_sizes=(64, 64))
+		self.assertEqual(policy.layers[0].in_features, 26)
+		self.assertEqual(policy.layers[0].out_features, 64)
+		self.assertEqual(policy.layers[2].out_features, 64)
+		self.assertEqual(
+			policy(torch.zeros(26)).shape,
+			(9,),
+		)
+
 	def test_batched_update_decays_schedule_and_restores_checkpoint(self) -> None:
 		with tempfile.TemporaryDirectory() as directory:
 			checkpoint = Path(directory) / "shared.pt"

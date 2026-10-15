@@ -50,15 +50,31 @@ class EpisodeRollout:
 class DrivingPolicy(nn.Module):
 	"""Map normalized track/traffic observations to nine driving actions."""
 
-	def __init__(self, observation_size: int, action_count: int = 9) -> None:
+	def __init__(
+		self,
+		observation_size: int,
+		action_count: int = 9,
+		hidden_sizes: Sequence[int] = (256, 256),
+		sensible_init: bool = False,
+	) -> None:
 		super().__init__()
-		self.layers = nn.Sequential(
-			nn.Linear(observation_size, 256),
-			nn.Tanh(),
-			nn.Linear(256, 256),
-			nn.Tanh(),
-			nn.Linear(256, action_count),
-		)
+		if not hidden_sizes or any(size <= 0 for size in hidden_sizes):
+			raise ValueError("hidden_sizes must contain positive layer sizes")
+		layers: list[nn.Module] = []
+		input_size = observation_size
+		for hidden_size in hidden_sizes:
+			layers.extend((nn.Linear(input_size, hidden_size), nn.Tanh()))
+			input_size = hidden_size
+		layers.append(nn.Linear(input_size, action_count))
+		self.layers = nn.Sequential(*layers)
+		if sensible_init:
+			for layer in self.layers:
+				if isinstance(layer, nn.Linear):
+					nn.init.orthogonal_(layer.weight, gain=nn.init.calculate_gain("tanh"))
+					nn.init.zeros_(layer.bias)
+			output_layer = self.layers[-1]
+			if isinstance(output_layer, nn.Linear):
+				nn.init.orthogonal_(output_layer.weight, gain=0.01)
 
 	def forward(self, observation: Tensor) -> Tensor:
 		return self.layers(observation)
@@ -224,6 +240,7 @@ class SharedPolicyTrainer:
 
 	CHECKPOINT_VERSION = 2
 	PPO_CLIP_RANGE = 0.2
+	ENTROPY_COEFFICIENT = 0.01
 
 	def __init__(
 		self,
@@ -236,6 +253,8 @@ class SharedPolicyTrainer:
 		minimum_learning_rate: float = 1e-5,
 		learning_rate_decay: float = 0.995,
 		gamma: float = 0.99,
+		hidden_sizes: Sequence[int] = (256, 256),
+		sensible_init: bool = False,
 	) -> None:
 		if learning_rate <= 0 or minimum_learning_rate <= 0:
 			raise ValueError("learning rates must be positive")
@@ -256,7 +275,12 @@ class SharedPolicyTrainer:
 			if self.device.index >= torch.cuda.device_count():
 				raise RuntimeError(f"CUDA device {self.device} is not available")
 
-		self.policy = DrivingPolicy(observation_size).to(self.device)
+		self.policy = DrivingPolicy(
+			observation_size,
+			hidden_sizes=hidden_sizes,
+			sensible_init=sensible_init,
+		).to(self.device)
+		self.hidden_sizes = tuple(hidden_sizes)
 		self.optimizer = torch.optim.AdamW(
 			self.policy.parameters(),
 			lr=learning_rate,
@@ -437,7 +461,10 @@ class SharedPolicyTrainer:
 					ratios * batch_returns,
 					clipped_ratios * batch_returns,
 				).mean()
-				loss = policy_loss - 0.01 * distribution.entropy().mean()
+				loss = (
+					policy_loss
+					- self.ENTROPY_COEFFICIENT * distribution.entropy().mean()
+				)
 
 				self.optimizer.zero_grad(set_to_none=True)
 				loss.backward()

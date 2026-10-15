@@ -307,6 +307,20 @@ def run_gui(device: str | None = None) -> None:
 	root.mainloop()
 
 
+def _parse_hidden_sizes(value: str) -> tuple[int, ...]:
+	try:
+		sizes = tuple(int(part.strip()) for part in value.split(","))
+	except ValueError as exc:
+		raise argparse.ArgumentTypeError(
+			"hidden sizes must be comma-separated positive integers"
+		) from exc
+	if not sizes or any(size <= 0 for size in sizes):
+		raise argparse.ArgumentTypeError(
+			"hidden sizes must be comma-separated positive integers"
+		)
+	return sizes
+
+
 def main() -> None:
 	parser = argparse.ArgumentParser(description="Procedural driving AI")
 	parser.add_argument(
@@ -353,9 +367,64 @@ def main() -> None:
 		default=1800,
 		help="maximum steps per episode (default: 1800)",
 	)
+	parser.add_argument(
+		"--obs_v2",
+		"--obs-v2",
+		dest="obs_v2",
+		action="store_true",
+		help="use fixed ego-frame traffic slots and road geometry inputs (headless)",
+	)
+	parser.add_argument(
+		"--hidden",
+		type=_parse_hidden_sizes,
+		default=(256, 256),
+		metavar="SIZES",
+		help="comma-separated tanh hidden-layer widths (default: 256,256)",
+	)
+	parser.add_argument(
+		"--traffic_density",
+		"--traffic-density",
+		dest="traffic_density",
+		type=int,
+		default=14,
+		help="maximum traffic cars per simulation; 0 disables traffic",
+	)
+	parser.add_argument(
+		"--traffic_speed",
+		"--traffic-speed",
+		dest="traffic_speed",
+		type=float,
+		default=20.0,
+		help="scripted traffic speed in km/h (default: 20)",
+	)
+	parser.add_argument(
+		"--ai_min_speed",
+		"--ai-min-speed",
+		dest="ai_min_speed",
+		type=float,
+		default=40.0,
+		help="AI minimum speed in km/h (default: 40)",
+	)
+	parser.add_argument(
+		"--curriculum",
+		action="store_true",
+		help="increase traffic density based on recent mean completion distance",
+	)
 	args = parser.parse_args()
 
 	if args.mode == "gui":
+		if (
+			args.obs_v2
+			or args.hidden != (256, 256)
+			or args.traffic_density != 14
+			or args.traffic_speed != 20.0
+			or args.ai_min_speed != 40.0
+			or args.curriculum
+		):
+			parser.error(
+				"observation, network, and traffic options are currently "
+				"supported only with --mode headless"
+			)
 		if args.device == "cuda" and not torch.cuda.is_available():
 			raise RuntimeError(
 				"CUDA was requested but is unavailable. Install CUDA-enabled "
@@ -381,6 +450,12 @@ def main() -> None:
 			max_policy_lag=args.max_policy_lag,
 			min_batch_episodes=args.min_batch_episodes,
 			max_episode_steps=args.max_episode_steps,
+			obs_v2=args.obs_v2,
+			hidden_sizes=args.hidden,
+			traffic_density=args.traffic_density,
+			traffic_speed_kmh=args.traffic_speed,
+			ai_min_speed_kmh=args.ai_min_speed,
+			curriculum=args.curriculum,
 		)
 
 

@@ -1,6 +1,7 @@
 """Batched headless training for the procedural driving simulation."""
 
 from dataclasses import dataclass, field
+from collections import deque
 from pathlib import Path
 import statistics
 import time
@@ -65,6 +66,12 @@ def train_headless(
 	max_policy_lag: int = 4,
 	min_batch_episodes: int = 128,
 	max_episode_steps: int = DrivingSimulation.MAX_EPISODE_STEPS,
+	obs_v2: bool = False,
+	hidden_sizes: tuple[int, ...] = (256, 256),
+	traffic_density: int = 14,
+	traffic_speed_kmh: float = 20.0,
+	ai_min_speed_kmh: float = 40.0,
+	curriculum: bool = False,
 ) -> SharedPolicyTrainer:
 	"""Run concurrent simulations and update the shared policy on each finish."""
 	if environments <= 0:
@@ -83,21 +90,31 @@ def train_headless(
 		raise ValueError("max_policy_lag cannot be negative")
 	if max_episode_steps <= 0:
 		raise ValueError("max_episode_steps must be positive")
+	if traffic_density < 0:
+		raise ValueError("traffic_density cannot be negative")
+	if not hidden_sizes or any(size <= 0 for size in hidden_sizes):
+		raise ValueError("hidden_sizes must contain positive layer sizes")
 
 	checkpoint = (
 		Path(checkpoint_path)
 		if checkpoint_path is not None
-		else Path(__file__).with_name(
-			"car_ai_async_checkpoint_v1.pt"
-			if async_reset
-			else "car_ai_shared_checkpoint_v2.pt"
+		else _default_checkpoint_path(
+			async_reset=async_reset,
+			obs_v2=obs_v2,
+			hidden_sizes=hidden_sizes,
 		)
 	)
 	trainer = SharedPolicyTrainer(
-		DrivingSimulation.OBSERVATION_SIZE,
+		(
+			DrivingSimulation.OBSERVATION_V2_SIZE
+			if obs_v2
+			else DrivingSimulation.OBSERVATION_SIZE
+		),
 		checkpoint_path=checkpoint,
 		device=device,
 		learning_rate_decay=learning_rate_decay,
+		hidden_sizes=hidden_sizes,
+		sensible_init=obs_v2 or hidden_sizes != (256, 256),
 	)
 	if trainer.device.type == "cuda":
 		print(f"Training device: {torch.cuda.get_device_name(trainer.device)}")
@@ -113,7 +130,14 @@ def train_headless(
 			seed=environment_seed,
 		)
 		simulation = DrivingSimulation(
-			track=track, traffic_count=14, seed=environment_seed
+			track=track,
+			traffic_count=traffic_density,
+			seed=environment_seed,
+			obs_v2=obs_v2,
+			traffic_speed_kmh=traffic_speed_kmh,
+			ai_min_speed_kmh=ai_min_speed_kmh,
+			randomize_starts=obs_v2,
+			curriculum=curriculum,
 		)
 		# Configure the existing simulator limit from the trainer without
 		# changing simulator behavior or its default.
@@ -132,10 +156,16 @@ def train_headless(
 			max_policy_lag=max_policy_lag,
 			min_batch_episodes=min_batch_episodes,
 			report_every=report_every,
+			curriculum=curriculum,
 		)
 
+	observation_size = (
+		DrivingSimulation.OBSERVATION_V2_SIZE
+		if obs_v2
+		else DrivingSimulation.OBSERVATION_SIZE
+	)
 	rollouts = [
-		EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+		EpisodeRollout(observation_size)
 		for _ in simulations
 	]
 	starting_update = trainer.updates_completed
@@ -144,6 +174,7 @@ def train_headless(
 	report_distance = 0.0
 	report_loss = 0.0
 	report_reasons: dict[str, int] = {}
+	recent_distances: deque[float] = deque(maxlen=100)
 
 	while trainer.updates_completed < target_update:
 		observations = [simulation.observe() for simulation in simulations]
@@ -169,12 +200,17 @@ def train_headless(
 			)
 			report_count += 1
 			report_distance += simulation.player.distance
+			recent_distances.append(simulation.player.distance)
+			if curriculum:
+				mean_distance = sum(recent_distances) / len(recent_distances)
+				for environment in simulations:
+					environment.set_curriculum_distance(mean_distance)
 			report_loss += loss
 			reason = result.crash_reason or "unknown"
 			report_reasons[reason] = report_reasons.get(reason, 0) + 1
 
 			simulation.reset()
-			rollouts[index] = EpisodeRollout(DrivingSimulation.OBSERVATION_SIZE)
+			rollouts[index] = EpisodeRollout(observation_size)
 
 			if report_count >= report_every or trainer.updates_completed >= target_update:
 				reason_summary = ", ".join(
@@ -223,6 +259,25 @@ def _finish_episode(
 	)
 
 
+def _default_checkpoint_path(
+	async_reset: bool,
+	obs_v2: bool,
+	hidden_sizes: tuple[int, ...],
+) -> Path:
+	if not obs_v2 and hidden_sizes == (256, 256):
+		return Path(__file__).with_name(
+			"car_ai_async_checkpoint_v1.pt"
+			if async_reset
+			else "car_ai_shared_checkpoint_v2.pt"
+		)
+	model_name = "obs_v2" if obs_v2 else "obs_v1"
+	hidden_name = "-".join(str(size) for size in hidden_sizes)
+	collector = "async" if async_reset else "legacy"
+	return Path(__file__).with_name(
+		f"car_ai_{model_name}_{hidden_name}_{collector}.pt"
+	)
+
+
 def _filter_stale_episodes(
 	episodes: list[_FinishedEpisode],
 	current_policy_version: int,
@@ -248,9 +303,18 @@ def _train_auto_reset(
 	max_policy_lag: int,
 	min_batch_episodes: int,
 	report_every: int,
+	curriculum: bool,
 ) -> SharedPolicyTrainer:
 	"""Collect complete episodes continuously and update only at batch thresholds."""
-	observation_size = DrivingSimulation.OBSERVATION_SIZE
+	observation_size = (
+		getattr(
+			DrivingSimulation,
+			"OBSERVATION_V2_SIZE",
+			DrivingSimulation.OBSERVATION_SIZE,
+		)
+		if getattr(simulations[0], "obs_v2", False)
+		else DrivingSimulation.OBSERVATION_SIZE
+	)
 	environments = len(simulations)
 	current_observations = [simulation.observe() for simulation in simulations]
 	current_episodes = [
@@ -266,6 +330,7 @@ def _train_auto_reset(
 	window_transitions = 0
 	window_slot_samples = 0
 	window_ticks = 0
+	recent_distances: deque[float] = deque(maxlen=100)
 
 	while trainer.updates_completed < target_update:
 		# Every slot samples from the same immutable policy version for this tick.
@@ -302,6 +367,11 @@ def _train_auto_reset(
 			finished.append(finished_episode)
 			finished_transitions += finished_episode.transitions
 			completed_this_tick += 1
+			recent_distances.append(simulation.player.distance)
+			if curriculum:
+				mean_distance = sum(recent_distances) / len(recent_distances)
+				for environment in simulations:
+					environment.set_curriculum_distance(mean_distance)
 
 			# Reset only this environment on its terminal step. The returned
 			# observation is the first state of its next episode.
