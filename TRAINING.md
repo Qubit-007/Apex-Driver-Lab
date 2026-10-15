@@ -29,8 +29,27 @@ Useful controls:
 ```powershell
 .\quantum\Scripts\python.exe .\car.py --mode headless --environments 64 --updates 10 --minibatch-size 2048
 .\quantum\Scripts\python.exe .\car.py --mode headless --device cpu --environments 8 --updates 2
-<<<<<<< HEAD
 .\quantum\Scripts\python.exe .\car.py --mode headless --async_reset --environments 1000 --updates 100 --async-episodes 32 --async-transitions 8192 --max-policy-lag 4 --min_batch_episodes 128 --max-episode-steps 1800
+.\quantum\Scripts\python.exe .\car.py --mode headless --device cpu --environments 32 --until-stopped
+.\quantum\Scripts\python.exe .\car.py --mode 3d --terminal
+.\quantum\Scripts\python.exe .\car.py --mode 3d --terminal --device cpu --environments 32 --updates 10
+```
+
+`--mode 3d --terminal` trains the Python procedural driving simulation without
+opening a window. `--terminal` is required with `--mode 3d`. By default, this
+mode writes resumable checkpoint generations named
+`3D_world_checkpoint_v1_run_*.pt`; it runs 100 batches of 20 completed
+episodes by default and saves a checkpoint after every batch. Progress is
+printed as each batch completes. This mode defaults to 32 environments to
+avoid the long waits caused by the general headless default of 1,000
+environments. Use `--batch-episodes N` to adjust batch size, `--updates N` to
+adjust the number of batches, or `--until-stopped` for continuous training.
+Pass `--checkpoint PATH` to choose a different checkpoint family.
+
+For example, run 100 batches of 20 completed episodes on CPU:
+
+```powershell
+.\quantum\Scripts\python.exe .\car.py --mode 3d --terminal --device cpu --batch-episodes 20 --updates 100
 ```
 
 The async collector normalizes discounted Monte Carlo returns over the entire
@@ -50,7 +69,8 @@ and defaults to 1,800.
 Each async update reports transition steps/second, active slot percentage,
 episodes used and stale episodes dropped, mean episode length, mean and
 median final distance, mean discounted return, mean policy lag, end-reason
-counts, PPO clip fraction, approximate KL, and loss. Clip fraction and
+counts, PPO clip fraction, approximate KL, and loss, followed by the saved
+checkpoint generation path. Clip fraction and
 approximate KL are averaged over the PPO minibatches and optimization epochs
 in that update. The active percentage is the fraction of environment slots
 stepped during collection ticks; the synchronous learner temporarily pauses
@@ -126,9 +146,6 @@ observation version, hidden widths, and collector mode. Reusing a custom
 `--checkpoint` across incompatible observation sizes or network shapes will
 fail to load; use separate checkpoint paths for A/B runs. GUI mode currently
 supports only the original observation and network options.
-=======
-.\quantum\Scripts\python.exe .\car.py --mode headless --device cpu --environments 32 --until-stopped
-```
 
 Continuous training runs until `Ctrl+C`. A checkpoint is written after each
 completed update, so stopping does not discard completed work.
@@ -141,7 +158,6 @@ checkpoint family. Model checkpoints are local artifacts and are ignored by
 Git. The GUI selects the most recently saved compatible checkpoint from the
 GUI and shared-policy training families, then displays its source and progress
 in the status bar.
->>>>>>> 3530412f0987bce6e0e4e8e6cfe4f2121a1ee46a
 
 Verify CUDA in the configured environment with:
 
