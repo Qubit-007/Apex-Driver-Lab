@@ -17,7 +17,7 @@ A procedural driving simulator and reinforcement-learning sandbox built with Pyt
 
 ### Browser demo
 
-The static browser demo is available at [Apex Driver Lab](https://izzo047.github.io/Quantum-Wave-Simulation-with-AI/) after GitHub Pages deployment is enabled. It provides an interactive visualization and browser-side demonstration policy; it does not load or execute the trained PyTorch checkpoint.
+The static browser demo is available at [Apex Driver Lab] after GitHub Pages deployment is enabled. It provides an interactive visualization and browser-side demonstration policy; it does not load or execute the trained PyTorch checkpoint.
 
 To run it locally, serve the `web/` directory over HTTP (ES modules are not supported reliably from `file://` URLs):
 
